@@ -1,0 +1,3 @@
+/bin/
+*.sock
+/memory-guard

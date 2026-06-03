@@ -1,0 +1,9 @@
+.PHONY: build test fmt clean
+build:
+	go build -o bin/memory-guard ./...
+test:
+	go test ./...
+fmt:
+	go fmt ./...
+clean:
+	rm -rf bin
