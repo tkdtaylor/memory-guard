@@ -1,6 +1,6 @@
 # memory-guard — project instructions
 
-Gates all agent memory I/O (ASI06). **Go.** PolyForm Noncommercial 1.0.0.
+Gates all agent memory I/O (ASI06). **Go.** Apache-2.0.
 
 ## Language rationale (why Go, not Python)
 
