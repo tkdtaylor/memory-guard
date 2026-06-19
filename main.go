@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command memory-guard gates all agent memory I/O (ASI06): PII redaction + a write-gate
 // that rejects suspected context-poisoning + post-deletion verification.
 //
