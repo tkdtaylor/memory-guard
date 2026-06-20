@@ -29,7 +29,7 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   identity + flags). On a rejected write, no store mutation.
 - **Failure modes:** a write flagged for poisoning never persists (the write-gate). The raw PII is
   **never** stored — only the redacted form. The agent receives the opaque `stored_id`, **never** the
-  raw value. *(Tests: `TestWriteGateRejectsSuspectedInjection`, `TestWriteRedactsPIIAndStores`.)*
+  raw value. *(Tests: `TestWriteGateRejectsSuspectedInjection`, `TestWriteRedactsPIIAndStores`, `TestPoisoningRecallPrecision`, `TestPoisoningFailClosedPerCase` — adversarial recall=0.69, precision=0.85 on the v0 4-pattern regex; measured 2026-06-19 against 32-case corpus; see fitness-functions.md F-006.)*
 
 ### B-002: Validate a memory read (`validate_read`) — redact PII on the way out
 
