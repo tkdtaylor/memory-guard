@@ -2,7 +2,7 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-19
-**Status:** backlog (not started)
+**Status:** completed (🟡 code merged)
 
 > v0 ships four high-signal recognizers (EMAIL, US_SSN, CREDIT_CARD, API_KEY) as a Presidio stand-in.
 > This task **broadens recognizer coverage and cuts false-negatives** — strictly behind the `Detector`
