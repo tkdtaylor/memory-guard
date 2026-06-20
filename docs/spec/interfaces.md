@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-06-19
+**Last updated:** 2026-06-19 (task 003)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -48,7 +48,7 @@ yet enforced for access control in v0.
 | `ping` | `{"op":"ping"}` | `{"ok":true}` |
 | `validate_write` | `{"op":"validate_write","entry":…,"identity":{…}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` — **the raw value is never returned; a poisoned write never persists** |
 | `validate_read` | `{"op":"validate_read","query":…,"identity":{…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — matching contents joined and **PII-redacted on the way out** |
-| `verify_delete` | `{"op":"verify_delete","id":…}` | `{"confirmed":true}` — computed from a fresh post-delete presence check |
+| `verify_delete` | `{"op":"verify_delete","id":…}` | `{"confirmed":true,"residue_detected":bool,"residue_summary"?:…,"deletion_hash":…}` — fresh post-delete presence check **plus** a residue scan of the remaining store; `residue_summary` present only when `residue_detected:true`; `deletion_hash` is a deterministic SHA-256 of the deletion op |
 | *(other / malformed)* | any unparseable / unknown op | `{"error":{"code","message","retryable":false}}` (`bad_request` / `unknown_op`) |
 
 - Socket permissions are `0600` (owner-only). There is **no** `SO_PEERCRED` peer-uid check in v0 (the
@@ -77,7 +77,7 @@ type MemoryGuard struct { /* mu sync.Mutex; det Detector; store map[string]entry
 func NewMemoryGuard(det Detector) *MemoryGuard                                   // det == nil → default RegexDetector
 func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store; returns {allow, stored_id, flags}
 func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // substring scan → RedactPII; returns {allow, content_redacted, flags}
-func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence; returns {confirmed}
+func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors for residue; returns {confirmed, residue_detected, residue_summary?, deletion_hash}
 ```
 
 - **The store backend seam is the `Detector` plus the in-memory `store`** (`guard.go`). The detection
@@ -86,8 +86,11 @@ func (g *MemoryGuard) VerifyDelete(id string) map[string]any                    
 - **`ValidateWrite` is the write-gate** — it runs `DetectInjection` before storing and fails closed
   (`allow:false`, `stored_id:null`, no store mutation) on `injection_suspected`; otherwise it redacts
   PII, mints an opaque `stored_id`, and stores the redacted content.
-- **`VerifyDelete` proves absence** — it deletes then re-reads the store and reports `confirmed` from
-  that fresh check.
+- **`VerifyDelete` proves absence and scans for residue** — it deletes, re-reads the store and reports
+  `confirmed` from that fresh check, then scans the remaining entries for a surviving fragment of the
+  deleted content (`residue_detected` + `residue_summary`), returning a deterministic `deletion_hash`
+  for audit linkage. The residue scan is guard-side stdlib logic (`residue.go`, ADR-003), not a
+  `Detector` concern — no detector-backend type appears in it.
 - **Stability:** the argument and return shapes are the contract. Changing them is an ADR-level
   decision. No detector-backend-specific type appears in the signatures — the boundary stays plain
   Go maps / JSON.

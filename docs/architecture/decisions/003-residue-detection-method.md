@@ -79,8 +79,26 @@ ADR-002 ever adopts one (it currently does not, so no embedding dependency exist
 
 ## Measured
 
-> Filled in by the task 003 implementation (REQ-003 / TC-003).
+Recorded by the task 003 implementation (`TestResidueCorpusDetectionRate` in `residue_test.go`;
+reproduce with `go test -v -run TestResidueCorpusDetectionRate ./...`). The implemented method is the
+tiered scan above plus a **tier 2b "contiguous distinctive phrase"** match (a ≥3-distinctive-token
+contiguous span surviving verbatim/normalized), which catches multi-word secret fragments whose
+individual tokens are too short to be "strong" on their own ("merger with Acme Corp"). Tuning:
+single-token matches require a *strong* token (digit-bearing, or ≥8 chars) so a lone common word
+never flags; tier-3 token-overlap threshold = 0.70 over ≥3 distinctive tokens.
 
-- **Residue-detection rate on the labelled corpus:** _to be recorded (>80% required), broken down per
-  residue class (verbatim / normalized-numeric / paraphrase)._
-- **`dep-scan` / `code-scanner`:** no new dependency added → trivially clear.
+- **Residue-detection rate on the labelled corpus (18 cases: 12 residue + 2 paraphrase + 4 clean):**
+  | Residue class | Rate |
+  |---|---|
+  | verbatim | 5/5 = 100% |
+  | normalized-numeric (incl. `$5000`→`$5k`, `5,000`→`5000`, k/m magnitudes, reordered/partial) | 7/7 = 100% |
+  | paraphrase (the **documented known-miss class** of a substring/token method — not padded) | 0/2 = 0% |
+  | **OVERALL** | **12/14 = 85.7%** (bar: >80% ✓) |
+  | **Precision** | **0 false positives / 4 clean controls = 100%** |
+
+  The >80% bar is met because realistic residue (copy / truncate / abbreviate / renumber) is
+  overwhelmingly verbatim-or-normalized, which the method catches at 100%; the only misses are the two
+  full-paraphrase cases, recorded honestly. Closing the paraphrase class is the deferred
+  embedding-based upgrade behind the same `verify_delete` surface.
+- **`dep-scan` / `code-scanner`:** no new dependency added — `go.mod` / `go.sum` unchanged; only
+  `crypto/sha256` (stdlib) was newly imported. Trivially clear (TC-006).

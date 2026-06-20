@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-06-19 (adoption into the create-project workflow — bootstrap ADR-001)
+**Last updated:** 2026-06-19 (task 003 — verify_delete residue scan, ADR-003)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -57,7 +57,7 @@ C4Component
     Container_Boundary(boundary, "memory-guard binary") {
         Component(main, "CLI", "main.go", "serve / write / read subcommands; parse --socket; print WriteResult/ReadResult JSON for the one-shot demos; exit 2 on a missing/unknown subcommand")
         Component(ipc, "IPC server", "ipc.go", "serve: remove stale socket, bind 0600 Unix socket, frame newline-delimited JSON, dispatch validate_write/validate_read/verify_delete/ping over a shared *MemoryGuard; structured error shape {error:{code,message,retryable}}")
-        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store), ValidateRead (scan store → RedactPII), VerifyDelete (delete → re-check absence); in-memory store map[string]entry behind a sync.Mutex; mints opaque stored_id from crypto/rand")
+        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store), ValidateRead (scan store → RedactPII), VerifyDelete (delete → re-check absence → scan survivors for residue, ADR-003: tiered normalized substring/phrase/token-overlap, stdlib-only, returns confirmed/residue_detected/residue_summary?/deletion_hash)); in-memory store map[string]entry behind a sync.Mutex; mints opaque stored_id from crypto/rand")
         Component(detector, "Detector seam", "detector.go", "Detector interface (RedactPII / DetectInjection) + the v0 RegexDetector (Presidio stand-in): EMAIL/US_SSN/CREDIT_CARD/API_KEY recognizers; ignore/disregard-instructions, system-prompt, <system>/<instructions> injection patterns. The boundary that isolates the detection backend")
     }
 
@@ -83,8 +83,11 @@ C4Component
 - `validate_read(query, identity) -> { allow, content_redacted, flags }` — scans the store for
   substring hits and returns them **PII-redacted** (defense in depth); v0 always `allow:true`
   (`guard.go::ValidateRead`).
-- `verify_delete(id) -> { confirmed }` — deletes and **re-checks the store** to prove absence
-  (`guard.go::VerifyDelete`, ADR-001 §5). v1 extends the proof to every index/copy.
+- `verify_delete(id) -> { confirmed, residue_detected, residue_summary?, deletion_hash }` — deletes,
+  **re-checks the store** to prove absence, then **scans the surviving entries for residue** of the
+  deleted content (`guard.go::VerifyDelete` + `residue.go`, ADR-001 §5 / ADR-003). The residue scan is
+  a tiered normalized substring / phrase / token-overlap match — stdlib-only guard-side logic, not a
+  `Detector` concern.
 - Every malformed / unknown request is **fail-closed** — a structured error, nothing stored
   (`ipc.go::errShape`, ADR-001 §7).
 
@@ -132,12 +135,12 @@ sequenceDiagram
     Guard-->>IPC: { allow:true, content_redacted:"…<EMAIL>…", flags:[…] }
     IPC-->>Agent: { allow:true, content_redacted:"…", flags:[…] }
 
-    Note over Agent,Store: verify_delete proves absence
+    Note over Agent,Store: verify_delete proves absence AND scans survivors for residue
     Agent->>IPC: {"op":"verify_delete","id":"mem-…"}
     IPC->>Guard: VerifyDelete("mem-…")
-    Guard->>Store: delete(id); re-check presence
-    Guard-->>IPC: { confirmed:true }
-    IPC-->>Agent: { confirmed:true }
+    Guard->>Store: delete(id); re-check presence; scan survivors for residue (ADR-003)
+    Guard-->>IPC: { confirmed:true, residue_detected:bool, residue_summary?, deletion_hash }
+    IPC-->>Agent: { confirmed:true, residue_detected:…, deletion_hash:… }
 ```
 
 The `write` and `read` CLI subcommands exercise the in-process path (no socket bound) for operator
@@ -146,8 +149,10 @@ the store then reads it back redacted.
 
 > **The write-gate is fail-closed (ADR-001 §1).** `DetectInjection` runs **before** storage; a
 > suspected-poisoning entry never persists. PII is redacted before storage **and** again on read
-> (defense in depth). `verify_delete` proves absence (v0: re-checks the in-memory store; v1: scans
-> every index/copy). All of detection is behind the `Detector` seam, so swapping the v0 `RegexDetector`
+> (defense in depth). `verify_delete` proves absence (re-checks the in-memory store) **and** scans the
+> surviving entries for residue of the deleted content (ADR-003: tiered normalized substring / phrase /
+> token-overlap, stdlib-only guard-side logic — not a `Detector` concern). All PII/injection detection
+> is behind the `Detector` seam, so swapping the v0 `RegexDetector`
 > for Presidio leaves this sequence shape unchanged.
 
 ADR governing this flow: [ADR-001](decisions/001-foundational-stack.md) (write-gate fail-closed,

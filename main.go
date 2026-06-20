@@ -7,7 +7,7 @@
 //
 //	validate_write(entry, identity) -> { allow, stored_id, flags }
 //	validate_read(query, identity)  -> { allow, content_redacted, flags }
-//	verify_delete(id)               -> { confirmed }
+//	verify_delete(id)               -> { confirmed, residue_detected, residue_summary?, deletion_hash }
 //
 // PII/injection detection sits behind the Detector seam (detector.go) so Presidio can be
 // swapped in for v1 without changing this block.

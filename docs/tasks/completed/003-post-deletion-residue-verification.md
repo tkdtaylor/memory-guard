@@ -2,7 +2,7 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-19
-**Status:** backlog (not started)
+**Status:** completed (🟡 code merged — ADR-003 method; 85.7% residue rate, 100% precision)
 
 > Post-deletion verification is the **documented industry blind spot** the block exists to close
 > (scoping §6, arXiv 2604.16548). v0 proves only "absent from the in-memory map." This task makes
