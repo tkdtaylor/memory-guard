@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-06-19 (task 004)
+**Last updated:** 2026-06-19 (task 003)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 is **in-memory only** in v0 — a Go `map` that holds each entry's **redacted** content (PII already
@@ -143,11 +143,37 @@ matching contents, PII-redacted again on the way out. A query matching nothing �
 ### Format: `verify_delete` request / response
 
 ```json
-{ "op":"verify_delete", "id":"mem-1a2b3c" }   →   { "confirmed": true }
+{ "op":"verify_delete", "id":"mem-1a2b3c" }
 ```
 
-`confirmed` is computed from a fresh presence check **after** the delete (post-deletion verification),
-not assumed from the `delete()` call. Deleting an unknown/absent id still returns `{confirmed:true}`.
+→ no surviving residue:
+
+```json
+{ "confirmed": true, "residue_detected": false,
+  "deletion_hash": "64daabe2…bedf49" }
+```
+
+→ a fragment of the deleted content survives elsewhere:
+
+```json
+{ "confirmed": true, "residue_detected": true,
+  "residue_summary": "normalized residue of deleted content survives in entry mem-…: \"5000\"",
+  "deletion_hash": "64daabe2…bedf49" }
+```
+
+- `confirmed` is computed from a fresh presence check **after** the delete (post-deletion
+  verification), not assumed from the `delete()` call. Deleting an unknown/absent id still returns
+  `{confirmed:true}` (with `residue_detected:false`, no scan).
+- `residue_detected` is the result of a guard-side scan (ADR-003) of the **remaining** store for a
+  verbatim or near-verbatim fragment of the just-deleted content (a tiered normalized substring /
+  contiguous-phrase / token-overlap match, stdlib-only — **not** a `Detector` concern). Because the
+  scan runs over the survivors (after the target is removed), a deleted entry can never flag itself.
+- `residue_summary` (string) is present **only** when `residue_detected:true`; it names the match
+  class (`verbatim` / `normalized` / `phrase` / `token-overlap N%`) and the surviving entry id +
+  fragment. Callers that ignored the new fields are unaffected (additive).
+- `deletion_hash` is a deterministic **SHA-256** hex over the canonical deletion op (`id` + the
+  deleted content), for later audit-trail (RFC-6962-style) chaining. Same logical deletion → same
+  hash; different deleted content → different hash.
 
 ### Format: `ping` request
 
@@ -186,6 +212,12 @@ All current errors are `retryable:false`. Codes:
   wire shape is a JSON array.
 - **`confirmed` reflects a fresh post-delete check.** `verify_delete` re-reads the store after deleting
   and reports absence from that read — not from the `delete()` call's return.
+- **`residue_detected` reflects a scan of the survivors, never of the deleted entry itself.** The scan
+  runs over the store *after* the target id is removed, so a deleted entry cannot flag itself (no
+  self-residue false positive). The residue scan is guard-side stdlib logic; no detector-backend type
+  participates.
+- **`deletion_hash` is deterministic.** It is a pure function (SHA-256) of the deletion op (`id` +
+  deleted content) — reproducible across runs and processes, with no randomness.
 - **No detector-backend-specific type crosses the wire** — the contract is plain JSON
   (`allow`/`stored_id`/`content_redacted`/`flags`/`confirmed`), so a future detection backend
   (Presidio / ONNX / NER) slots in behind the `Detector` interface unchanged.

@@ -14,7 +14,7 @@ import (
 //
 //	validate_write(entry, identity) -> { allow, stored_id, flags }
 //	validate_read(query, identity)  -> { allow, content_redacted, flags }
-//	verify_delete(id)               -> { confirmed }
+//	verify_delete(id)               -> { confirmed, residue_detected, residue_summary?, deletion_hash }
 //
 // The PII/injection detection lives behind the Detector seam (detector.go). The value-add
 // the block OWNS is here: the write-gate (fail-closed on suspected poisoning) and
@@ -70,13 +70,43 @@ func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[st
 		"flags": flagsOrEmpty(flags)}
 }
 
-// VerifyDelete deletes an entry and PROVES it is gone (post-deletion verification).
+// VerifyDelete deletes an entry and PROVES it is gone (post-deletion verification — ADR-001 §5,
+// ADR-003). It (1) removes the entry, (2) re-checks absence (the v0 proof), and (3) scans the
+// REMAINING store for residue of the deleted content — a verbatim or near-verbatim fragment that
+// survives in another entry (the documented industry gap a bare delete() misses). The residue
+// scan is deterministic, stdlib-only guard-side orchestration (residue.go); it is NOT a Detector
+// concern, so no detector backend specifics leak into it.
+//
+// Returns { confirmed, residue_detected, residue_summary?, deletion_hash }:
+//   - confirmed       — the target id is gone (the v0 meaning, preserved). Deleting an absent id
+//     still confirms gone (idempotent).
+//   - residue_detected — a fragment of the deleted content survives elsewhere in the store.
+//   - residue_summary  — present only when residue_detected; names the class + the surviving entry.
+//   - deletion_hash    — deterministic SHA-256 over (id + deleted content) for audit-trail linkage.
 func (g *MemoryGuard) VerifyDelete(id string) map[string]any {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	deleted, existed := g.store[id]
 	delete(g.store, id)
 	_, stillPresent := g.store[id]
-	return map[string]any{"confirmed": !stillPresent}
+
+	out := map[string]any{
+		"confirmed":        !stillPresent,
+		"residue_detected": false,
+		"deletion_hash":    deletionHash(id, deleted.content),
+	}
+
+	// Residue is only meaningful for content that actually existed and was removed. Scanning the
+	// SURVIVORS (the store after delete) means a deleted entry can never flag itself (no
+	// self-residue false positive — the truth-table edge case).
+	if existed {
+		if detected, summary := residueScan(deleted.content, g.store); detected {
+			out["residue_detected"] = true
+			out["residue_summary"] = summary
+		}
+	}
+	return out
 }
 
 func contains(xs []string, want string) bool {

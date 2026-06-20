@@ -46,19 +46,29 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   `TestWriteRedactsPIIAndStores` — the read half asserts `<EMAIL>` present and `alice@example.com`
   absent.)*
 
-### B-003: Verify a deletion (`verify_delete`) — prove absence, not just delete
+### B-003: Verify a deletion (`verify_delete`) — prove absence **and** scan for surviving residue
 
 - **Trigger:** `{"op":"verify_delete","id":…}` over IPC, or `MemoryGuard.VerifyDelete(id)` in-process.
-- **Response:** the guard removes the entry keyed by `id` from the in-memory store and then
-  **re-checks** the store for that id, returning `{ "confirmed": true }` iff the entry is no longer
-  present (`!stillPresent`). This is **post-deletion verification** — the result is computed from a
-  fresh presence check after the delete, not assumed from the `delete()` call.
+- **Response:** the guard (1) removes the entry keyed by `id` from the in-memory store, (2)
+  **re-checks** the store for that id (`confirmed:true` iff no longer present — the v0 proof), then
+  (3) **scans the remaining store for residue** of the just-deleted content and returns
+  `{ "confirmed", "residue_detected", "residue_summary"?, "deletion_hash" }`. `residue_detected:true`
+  means a verbatim or near-verbatim fragment of the deleted content survives in another entry (the
+  documented industry gap a bare `delete()` misses); when true, `residue_summary` names the match
+  class (`verbatim` / `normalized` / `phrase` / `token-overlap N%`) and the surviving entry. The
+  residue scan is a tiered, normalized substring / contiguous-phrase / token-overlap match (ADR-003) —
+  deterministic, **stdlib-only guard-side orchestration**, with **no** detector backend involvement.
+  `deletion_hash` is a deterministic SHA-256 over the deletion op (`id` + deleted content) for
+  audit-trail linkage.
 - **Side effects:** removes the entry from the in-memory store (idempotent — deleting an absent id is a
-  no-op that still confirms gone).
-- **Failure modes:** deleting an unknown or already-deleted id still returns `{confirmed:true}` (the
-  entry is verifiably absent either way). v0 proves absence only in the in-memory store; v1 extends the
-  proof to every index/copy (residue detection). *(Test: `TestVerifyDeleteConfirmsAbsence` — including
-  re-deleting an absent id.)*
+  no-op that still confirms gone). The scan is read-only over the survivors.
+- **Failure modes:** deleting an unknown or already-deleted id still returns `confirmed:true,
+  residue_detected:false` (no scan — there is no deleted content to scan for). Because the scan runs
+  over the store *after* the target is removed, a deleted entry never flags itself (no self-residue
+  false positive). Full semantic paraphrase is the known miss class of the substring/token method
+  (ADR-003), recorded honestly per residue class. *(Tests: `TestVerifyDeleteConfirmsAbsence` (v0 compat),
+  `TestVerifyDeleteReturnsResidueFields`, `TestVerifyDeleteTruthTable`, `TestResidueCorpusDetectionRate`,
+  `TestDeletionHashDeterministic`.)*
 
 ### B-004: Serve over a `0600` Unix-socket IPC server (`serve`)
 
@@ -119,9 +129,10 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 - **The agent never receives the raw stored value.** `validate_write` returns an opaque `stored_id`
   (`mem-<hex>` from `crypto/rand`); the stored content is reachable only via `validate_read`, and only
   in redacted form.
-- **Deletion is verified.** `verify_delete` re-checks the store after the delete and reports
-  `confirmed` from that fresh check — never an assumed success from the `delete()` call. (v0: the
-  in-memory store; v1: every index/copy.)
+- **Deletion is verified, and residue is hunted.** `verify_delete` re-checks the store after the
+  delete and reports `confirmed` from that fresh check — never an assumed success from the `delete()`
+  call — and additionally scans the remaining entries for a surviving fragment of the deleted content
+  (`residue_detected`), the documented industry gap. A deleted entry never flags itself.
 - **The detection backend is isolated behind the `Detector` seam.** All PII + injection detection goes
   through the `Detector` interface; the guard, the IPC, and the contract carry no backend-specific
   detail.
