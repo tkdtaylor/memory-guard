@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-19
 **Refines:** ADR-001 §5 (post-deletion verification) and ADR-001 "Open questions" → the residue-method entry.
-**Task:** [003 — Post-deletion verification across every index/copy](../../tasks/backlog/003-post-deletion-residue-verification.md)
+**Task:** [003 — Post-deletion verification across every index/copy](../../tasks/completed/003-post-deletion-residue-verification.md)
 
 ## Context
 

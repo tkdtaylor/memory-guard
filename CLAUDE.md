@@ -65,11 +65,12 @@ the v1 residue-detection method) are tracked as their own tasks/ADRs.
 ## Project structure
 
 ```
-detector.go    ← the Detector seam: PII + injection detection; v0 RegexDetector (Presidio stand-in)
+detector.go    ← the Detector seam: PII + injection detection; v0 RegexDetector + Go-native NativeDetector
+residue.go     ← post-deletion residue scan + deletion-hash (the verify_delete proof, behind VerifyDelete)
 guard.go       ← MemoryGuard core: ValidateWrite (write-gate) / ValidateRead / VerifyDelete + the in-memory store
 ipc.go         ← JSON-over-Unix-socket IPC server (validate_write / validate_read / verify_delete / ping); error shape
 main.go        ← CLI entrypoint: serve / write / read subcommands
-guard_test.go  ← unit tests for the write-gate, PII redaction, delete-verification, and the detector
+*_test.go      ← unit + suite tests: guard_test, residue_test, detector_native_test, detector_corpus_test, poisoning_suite_test
 go.mod         ← module github.com/tkdtaylor/memory-guard (go 1.26)
 Makefile       ← build / test / fmt / clean
 docs/          ← spec + planning + history (the source-of-truth side)
@@ -94,8 +95,8 @@ one of them is wrong; fix it in the same change.
 ## Tech stack
 
 Go (`go 1.26`, module `github.com/tkdtaylor/memory-guard`). **Single static binary.** The v0 has
-**no third-party dependencies** — the standard library only (`net`, `encoding/json`, `crypto/rand`,
-`regexp`, `bufio`, `sync`). The v1 Presidio-backed `Detector` (sidecar/ONNX) is the first external
+**no third-party dependencies** — the standard library only (`go.mod` has no `require` block). The v1
+Presidio-backed `Detector` (sidecar/ONNX) is the first external
 dependency and a future ADR — it must clear `dep-scan` / `code-scanner` as a blocking gate. License:
 **Apache-2.0** (SPDX header on every first-party `.go` file).
 

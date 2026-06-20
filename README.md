@@ -10,14 +10,14 @@ unredacted; poisoned writes are flagged and rejected at ingestion; and deletions
 
 > Prior-art verdict: **DERIVE** — ADOPT Microsoft Presidio (PII) and sit in front of any MemoryStore; BUILD the write-gate + post-deletion verification + adversarial suite.
 >
-> **Language: Go.** The block itself (contract, write-gate orchestration, delete-verification, IPC, hot-path gate) is Go — uniform with the rest of the ecosystem, single static binary, low per-call overhead on a path that gates *every* memory op. The one Python-leaning dependency (Presidio) is isolated **behind the `Detector` seam** ([detector.go](detector.go)): v0 ships a pure-Go `RegexDetector`; v1 swaps in a Presidio-backed detector (sidecar/subprocess or ONNX runtime) without touching the guard or contract. *Adopt the tool behind a seam; don't let it dictate the substrate.* **License: Apache-2.0.**
+> **Language: Go.** The block itself (contract, write-gate orchestration, delete-verification, IPC, hot-path gate) is Go — uniform with the rest of the ecosystem, single static binary, low per-call overhead on a path that gates *every* memory op. The one Python-leaning dependency (Presidio) is isolated **behind the `Detector` seam** ([detector.go](detector.go)): v0 ships pure-Go detectors (`RegexDetector` and the Go-native `NativeDetector`, the resolved backend per [ADR-002](docs/architecture/decisions/002-detector-backend.md)); a Presidio-backed detector (sidecar/subprocess or ONNX runtime) is deferred-not-foreclosed and slots in behind the same seam without touching the guard or contract. *Adopt the tool behind a seam; don't let it dictate the substrate.* **License: Apache-2.0.**
 
 ## Contract (interface-contracts.md §2)
 
 ```
 validate_read(query, identity)  -> { allow, content_redacted, flags }
 validate_write(entry, identity) -> { allow, stored_id, flags }
-verify_delete(id)               -> { confirmed }
+verify_delete(id)               -> { confirmed, residue_detected, residue_summary?, deletion_hash }
 ```
 
 > Note: memory-guard was **out of the tracer-bullet scope** (the slice is stateless,
@@ -28,8 +28,8 @@ verify_delete(id)               -> { confirmed }
 
 ```sh
 go build ./... && go test ./...
-memory-guard write "contact alice@example.com"     # redacts PII, stores
-memory-guard serve --socket /run/memguard.sock     # IPC daemon
+go run . write "contact alice@example.com"          # redacts PII, stores
+go run . serve --socket /run/memguard.sock          # IPC daemon
 ```
 
 IPC: `{"op":"validate_write","entry":"…"}` · `{"op":"validate_read","query":"…"}` ·
@@ -37,16 +37,19 @@ IPC: `{"op":"validate_write","entry":"…"}` · `{"op":"validate_read","query":"
 
 ## Status
 
-🚧 **v0 skeleton.** Working write-gate (injection flag + fail-closed), regex `Detector`
-(Presidio stand-in behind the seam), in-memory store (MemoryStore stand-in), post-deletion
-verify. **Deferred (v1):** Presidio-backed `Detector` (sidecar/ONNX), real MemoryStore
-backends, identity-scoped access, adversarial poisoning test-suite, audit-trail emission.
-See [docs/CONTRACT.md](docs/CONTRACT.md) and the scoping doc.
+🚧 **v0.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning
+test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go
+`Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), in-memory store
+(MemoryStore stand-in), and post-deletion verification with residue detection + deletion-hash.
+**Deferred (v1):** Presidio-backed `Detector` (sidecar/ONNX), real MemoryStore backends,
+identity-scoped access, audit-trail emission. See [docs/CONTRACT.md](docs/CONTRACT.md) and the
+scoping doc.
 
 ## Adapter seam & standards
 
-`Detector` interface (PII + injection detection) — pluggable: RegexDetector (v0), Presidio
-(v1). Sits in front of any LangChain/LlamaIndex MemoryStore behind the validate_* verbs.
+`Detector` interface (PII + injection detection) — pluggable: `RegexDetector` and Go-native
+`NativeDetector` (v0), Presidio-backed (v1, deferred). Sits in front of any
+LangChain/LlamaIndex MemoryStore behind the validate_* verbs.
 
 ## License
 

@@ -11,11 +11,14 @@ implementation lives in the runner the rules point to.
 
 ## Status
 
-There is **no `make fitness` / `go fitness` target wired yet** — `go build ./... && go test ./...`
-(plus dep-scan / code-scanner for the supply chain once a Presidio-backed detector lands) is the
-verification gate today. The rows below are **proposed** (the security invariants the codebase
-implies). Promoting one to `active` means adding its check command and wiring it into a `fitness`
-umbrella target, in the same commit as the rule change.
+There is **no `make fitness` / `go fitness` umbrella target wired yet** — `go build ./... && go test
+./...` (plus dep-scan / code-scanner for the supply chain once a Presidio-backed detector lands) is
+the verification gate today. F-001–F-005 are **proposed** (security invariants the codebase implies,
+each covered by an existing unit test but not yet wired to a runner). **F-006 is `active`** — its
+check runs through `go test -run TestPoisoning ./...` directly, not the `make fitness-<rule>` form the
+rows below document; that convention applies once an umbrella runner is wired. Promoting another rule
+to `active` means giving it a runnable check command (and, when the umbrella lands, a `fitness-<rule>`
+target), in the same commit as the rule change.
 
 ## How to run (once wired)
 

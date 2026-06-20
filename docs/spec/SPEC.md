@@ -63,10 +63,13 @@ on the memory hot path). **Apache-2.0.**
   `validate_read` redacts again on the way out. The raw PII never enters the store and never appears in
   a response — it is replaced by `<LABEL>` placeholders. *(Enforced in `guard.go::ValidateWrite` /
   `ValidateRead`; test `TestWriteRedactsPIIAndStores`. Proposed fitness rule F-002.)*
-- **Deletion is verified, not assumed.** `verify_delete` deletes the entry and **re-checks the store**
-  to prove absence, returning `{confirmed}` — never a bare `delete()` whose success is assumed. (v0
-  proves absence in the in-memory store; v1 extends the proof to every index/copy.) *(Enforced in
-  `guard.go::VerifyDelete`; test `TestVerifyDeleteConfirmsAbsence`. Proposed fitness rule F-003.)*
+- **Deletion is verified, not assumed.** `verify_delete` deletes the entry, **re-checks the store** to
+  prove absence, and **scans surviving entries for residue** of the deleted content, returning
+  `{confirmed, residue_detected, residue_summary?, deletion_hash}` — never a bare `delete()` whose
+  success is assumed. v0 proves absence in the in-memory store and ships residue detection (normalized
+  substring/token match, ADR-003); v1 extends the proof to every index/copy. *(Enforced in
+  `guard.go::VerifyDelete` and `residue.go`; test `TestVerifyDeleteConfirmsAbsence`. Proposed fitness
+  rule F-003.)*
 - **The detection backend lives only behind the `Detector` seam.** No Presidio (or any backend)
   specific detail leaks past the `Detector` interface (`detector.go`) into the guard, the contract, or
   the IPC. Swapping `RegexDetector` for a Presidio-backed detector is a one-implementation change.

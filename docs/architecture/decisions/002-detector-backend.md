@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-19
 **Supersedes:** ADR-001 "Open questions" → the `Detector` backend entry (the deferred decision).
-**Task:** [001 — Resolve the `Detector` backend (memory-guard tracer)](../../tasks/backlog/001-detector-backend-tracer.md)
+**Task:** [001 — Resolve the `Detector` backend (memory-guard tracer)](../../tasks/completed/001-detector-backend-tracer.md)
 
 ## Context
 

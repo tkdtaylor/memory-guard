@@ -36,7 +36,7 @@ Note: memory-guard guards what gets **stored**; `armor` guards what **enters** t
 
 | Name | Technology | Responsibility | Source path | Depends on |
 |------|------------|----------------|-------------|------------|
-| memory-guard binary | Go (`go 1.26`) single static binary | Gate every memory write (write-gate, fail-closed on poisoning), redact PII on write and read, and verify deletions (`validate_write`/`validate_read`/`verify_delete`); serve over a `0600` Unix socket or run the one-shot `write`/`read` demos | `detector.go`, `guard.go`, `ipc.go`, `main.go` | **stdlib only** (`net`, `encoding/json`, `crypto/rand`, `regexp`, `bufio`, `sync`) |
+| memory-guard binary | Go (`go 1.26`) single static binary | Gate every memory write (write-gate, fail-closed on poisoning), redact PII on write and read, and verify deletions (`validate_write`/`validate_read`/`verify_delete`); serve over a `0600` Unix socket or run the one-shot `write`/`read` demos | `detector.go`, `guard.go`, `residue.go`, `ipc.go`, `main.go` | **stdlib only** (`go.mod` has no `require` block) |
 
 **Invariants for this table**
 - The single container corresponds to the one Go `package main` (the single-binary layout, ADR-001 §2).
@@ -52,8 +52,9 @@ Note: memory-guard guards what gets **stored**; `armor` guards what **enters** t
 |-----------|-----------|-------------|----------------|------------|
 | memory-guard binary | CLI | `main.go` | Parse `serve`/`write`/`read` subcommands and `--socket`; run the in-process `write`/`read` demos (print `WriteResult`/`ReadResult` JSON); start `serve`; exit `2` on a missing/unknown subcommand | IPC server, MemoryGuard core |
 | memory-guard binary | IPC server | `ipc.go` | `serve`: remove a stale socket, bind the `0600` Unix socket, frame newline-delimited JSON, dispatch `validate_write`/`validate_read`/`verify_delete`/`ping` over a shared `*MemoryGuard` (goroutine per connection); structured error shape `{error:{code,message,retryable}}` (`bad_request`/`unknown_op`) | MemoryGuard core |
-| memory-guard binary | MemoryGuard core | `guard.go` | The in-memory store (`map[string]entry` behind a `sync.Mutex`) + `ValidateWrite` (write-gate: `DetectInjection` → fail-closed on `injection_suspected` → `RedactPII` → store), `ValidateRead` (substring scan → `RedactPII`), `VerifyDelete` (delete → re-check absence); mints the opaque `stored_id` (`mem-<hex>`) from `crypto/rand`. The value-add the block owns | Detector seam |
-| memory-guard binary | Detector seam | `detector.go` | The `Detector` interface (`RedactPII` / `DetectInjection`) + the v0 `RegexDetector`: PII recognizers (EMAIL, US_SSN, CREDIT_CARD, API_KEY → `<LABEL>` + `pii:<LABEL>` flags) and injection patterns (ignore/disregard-instructions, `system prompt`, `<system>`/`<instructions>` tags → `["injection_suspected"]`). The Presidio stand-in; the boundary that isolates the detection backend | — (stdlib `regexp` only) |
+| memory-guard binary | MemoryGuard core | `guard.go` | The in-memory store (`map[string]entry` behind a `sync.Mutex`) + `ValidateWrite` (write-gate: `DetectInjection` → fail-closed on `injection_suspected` → `RedactPII` → store), `ValidateRead` (substring scan → `RedactPII`), `VerifyDelete` (delete → re-check absence → residue scan over survivors → `deletion_hash`, returning `{confirmed, residue_detected, residue_summary?, deletion_hash}`); mints the opaque `stored_id` (`mem-<hex>`) from `crypto/rand`. The value-add the block owns | Detector seam, residue scan |
+| memory-guard binary | Detector seam | `detector.go` | The `Detector` interface (`RedactPII` / `DetectInjection`) + the v0 pure-Go backends (`RegexDetector` and the Go-native `NativeDetector`, the resolved backend per ADR-002): PII recognizers (EMAIL, US_SSN, CREDIT_CARD, API_KEY → `<LABEL>` + `pii:<LABEL>` flags) and injection patterns (ignore/disregard-instructions, `system prompt`, `<system>`/`<instructions>` tags → `["injection_suspected"]`). The Presidio stand-in; the boundary that isolates the detection backend | — (stdlib `regexp` only) |
+| memory-guard binary | Residue scan | `residue.go` | Post-deletion residue detection (normalized substring/token match for surviving fragments of deleted content per ADR-003) + the deterministic `deletion_hash` (SHA-256 over `id`+content for audit-trail linkage). Invoked by `VerifyDelete`; not a Detector concern | — (stdlib `crypto/sha256`, `regexp` only) |
 
 ---
 
@@ -66,8 +67,10 @@ Note: memory-guard guards what gets **stored**; `armor` guards what **enters** t
 - **`Detector` seam isolates the detection backend** — the v0 `RegexDetector` can be swapped for a
   Presidio-backed detector (sidecar / ONNX) or a Go-native NER model without changing the guard, the
   contract, or the IPC. (ADR-001 §3)
-- **Post-deletion verification** — `VerifyDelete` proves absence (v0: re-checks the in-memory store;
-  v1: every index/copy), never a bare `delete()`. (ADR-001 §5)
+- **Post-deletion verification** — `VerifyDelete` proves absence (re-checks the in-memory store) and
+  scans surviving entries for residue of the deleted content, returning a `deletion_hash` for
+  audit-trail linkage; never a bare `delete()`. v0 ships residue detection (normalized
+  substring/token match, ADR-003); v1 extends the proof to every index/copy. (ADR-001 §5, ADR-003)
 - **Fail-closed errors** — every malformed/unknown request resolves to a structured error; nothing is
   stored. (ADR-001 §7)
 - **Single-binary Go layout** — one `package main`, deployed as a static binary alongside the agent.
