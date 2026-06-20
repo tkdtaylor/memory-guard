@@ -100,20 +100,27 @@ type Detector interface {
     DetectInjection(text string) []string                      // ["injection_suspected"] or nil
 }
 
-func NewRegexDetector() *RegexDetector                          // the v0 pure-Go Presidio stand-in
+func NewRegexDetector() *RegexDetector                          // the v0 pure-Go Presidio stand-in / parity baseline
 func (d *RegexDetector) RedactPII(text string) (string, []string)
 func (d *RegexDetector) DetectInjection(text string) []string
+
+func NewNativeDetector() *NativeDetector                        // v1 production backend (ADR-002): Go-native, in-process, zero new deps; CLI/serve default
+func (d *NativeDetector) RedactPII(text string) (string, []string)
+func (d *NativeDetector) DetectInjection(text string) []string
 ```
 
 ---
 
 ## Extension points
 
-The single extension point is the **`Detector` interface** (`detector.go`). A new detection backend —
-Presidio as a sidecar/subprocess, Presidio via an in-process ONNX runtime, or a Go-native NER model —
-is adopted by implementing `Detector` and passing it to `NewMemoryGuard`, **never** by changing the
-guard, the IPC, or the wire contract. There is no plugin registry in v0; extension is by source
-modification behind the seam, and the backend choice (deployment shape + hot-path latency budget) is
-deferred to the memory-guard tracer. The in-memory `store` is the secondary (v1) seam where a real
-MemoryStore backend slots in behind the `validate_*` verbs.
+The single extension point is the **`Detector` interface** (`detector.go`). A new detection backend is
+adopted by implementing `Detector` and passing it to `NewMemoryGuard`, **never** by changing the guard,
+the IPC, or the wire contract. Two implementations ship: `RegexDetector` (v0 stand-in / parity baseline)
+and `NativeDetector` (the v1 production backend — Go-native, in-process, zero new dependencies; the
+CLI / `serve` default). The backend-choice decision (deployment shape + hot-path latency budget) was
+settled by the memory-guard tracer in **ADR-002** (in-process, ~5.6 µs detection cost per `validate_*`
+op); a Presidio-backed detector (sidecar / ONNX) is deferred but still slots in additively behind this
+same seam. There is no plugin registry in v0; extension is by source modification behind the seam. The
+in-memory `store` is the secondary (v1) seam where a real MemoryStore backend slots in behind the
+`validate_*` verbs.
 </content>
