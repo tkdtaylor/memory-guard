@@ -172,7 +172,7 @@ exactly the kind of cross-module boundary that stays composable; the write-gate 
 ## Working in this project
 
 Every task lives on its own branch (or worktree under concurrent sessions). Working directly on the
-default branch (`master`) is blocked by the `no-commit-on-main.py` hook — `scripts/start-task.sh` is
+default branch (`main`) is blocked by the `no-commit-on-main.py` hook — `scripts/start-task.sh` is
 how you pick the right isolation.
 
 1. Start each session by reading the relevant task file (including its **Verification plan**) and its test spec
@@ -185,10 +185,10 @@ how you pick the right isolation.
    The executor commits at status **🟡 (code merged)** on the task branch.
 5. After the executor returns, use **spec-verifier** on the task — it returns APPROVE or BLOCK based on per-assertion evidence
 6. If spec-verifier APPROVEs **and** the verification plan's L5/L6 evidence is recorded, promote the row to **✅ (verified)** in `coverage-tracker.md` in a **separate commit** titled `verify: confirm task NNN — <evidence>` (still on the task branch)
-7. **Merge to master** when ready: `git checkout master && git merge task/NNN-<slug>`. The cleanup hook then deletes the task branch and removes the worktree (if any).
+7. **Merge to main** when ready: `git checkout main && git merge task/NNN-<slug>`. The cleanup hook then deletes the task branch and removes the worktree (if any).
 8. **Commit after each milestone** — never start the next task without committing the current one first
 
-The separation between the task branch and `master` is the load-bearing rule for multi-session
+The separation between the task branch and `main` is the load-bearing rule for multi-session
 safety. The separation between 🟡 (feat commit) and ✅ (verify commit) is the load-bearing rule for
 verification honesty: **never** mark ✅ in the same commit as the feature work.
 
@@ -197,7 +197,7 @@ verification honesty: **never** mark ✅ in the same commit as the feature work.
 **Commit after every milestone.** Do not batch multiple tasks into one commit. Do not continue to the
 next task until the current one is committed.
 
-All commits below land on the **task branch** (`task/NNN-<slug>`), never on `master` directly.
+All commits below land on the **task branch** (`task/NNN-<slug>`), never on `main` directly.
 
 | Milestone | What to stage | Message |
 |-----------|--------------|---------|
@@ -206,10 +206,10 @@ All commits below land on the **task branch** (`task/NNN-<slug>`), never on `mas
 | Task code merged (🟡) | source changes, moved task file, `coverage-tracker.md` row set to 🟡, affected `docs/spec/` files | `feat: complete task NNN — <name>` |
 | Task verified (✅) | `coverage-tracker.md` row promoted 🟡 → ✅ with `Verified by` filled | `verify: confirm task NNN — <evidence>` |
 | Diagram updated | `docs/architecture/diagrams.md` (with date bump) | `docs: refresh diagrams — <what changed>` |
-| Merged into master | (after `git merge task/NNN-<slug>` on `master`) | (default `Merge branch …` message) |
+| Merged into main | (after `git merge task/NNN-<slug>` on `main`) | (default `Merge branch …` message) |
 
-This repo is **public** (Apache-2.0); there is **no git remote yet** (TODO.md) — push after each
-milestone once a remote is configured. For a genuine master-only doc fix, include `[allow-main]` in
+This repo is **private** on GitHub (`tkdtaylor/memory-guard`, Apache-2.0-licensed) — push after each
+milestone. For a genuine main-only doc fix, include `[allow-main]` in
 the message.
 
 ## Plan mode
@@ -273,7 +273,7 @@ export CLAUDE_DISABLED_HOOKS=desktop-notify,batch-format-typecheck
 - **Add future-tense statements to the spec.** Planned work goes in `docs/plans/` and `docs/tasks/`.
 - **Mark a task ✅ on the same commit as the feature work.**
 - **Claim a verification level you did not actually reach.**
-- **Commit directly to `master`.** Use `[allow-main]` in the message for genuine master-only doc fixes.
+- **Commit directly to `main`.** Use `[allow-main]` in the message for genuine main-only doc fixes.
 - **Leak a detector backend's specifics past the `Detector` seam** — it collapses the one seam that keeps the substrate (Go) independent of the detection tool (Presidio).
 - **Let the write-gate regress into a thin PII-redaction wrapper** — the fail-closed poisoning gate is the built delta, not an optional layer.
 - **Reduce `verify_delete` to a bare `delete()`** — it must prove absence; in v1, across every index/copy.
