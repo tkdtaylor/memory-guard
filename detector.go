@@ -67,3 +67,34 @@ func (d *RegexDetector) DetectInjection(text string) []string {
 	}
 	return nil
 }
+
+// NativeDetector is the v1 production Detector backend chosen by the memory-guard tracer
+// (ADR-002): Go-native, in-process, zero new third-party dependencies — it stays inside the
+// Go standard library, preserving ADR-001 §2's stdlib-only property. No Presidio sidecar, no
+// ONNX runtime, no IPC round-trip on the memory hot path.
+//
+// It is a distinct, swappable Detector that reaches parity with RegexDetector on the v0
+// categories (EMAIL / US_SSN / CREDIT_CARD / API_KEY + the v0 injection patterns) by composing
+// the same high-signal recognizers internally. Broadening recall (Presidio-grade NER breadth)
+// is a detector-internal task (004) behind RedactPII — no guard / IPC / contract impact, because
+// the choice lives entirely behind the unchanged Detector seam.
+type NativeDetector struct {
+	base *RegexDetector
+}
+
+// NewNativeDetector builds the Go-native in-process detector (ADR-002).
+func NewNativeDetector() *NativeDetector {
+	return &NativeDetector{base: NewRegexDetector()}
+}
+
+// RedactPII satisfies the unchanged Detector interface — PII → <LABEL> placeholders + pii:<LABEL>
+// flags, in-process, no external call.
+func (d *NativeDetector) RedactPII(text string) (string, []string) {
+	return d.base.RedactPII(text)
+}
+
+// DetectInjection satisfies the unchanged Detector interface — ["injection_suspected"] or nil,
+// in-process, no external call.
+func (d *NativeDetector) DetectInjection(text string) []string {
+	return d.base.DetectInjection(text)
+}

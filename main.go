@@ -41,15 +41,15 @@ func main() {
 			os.Exit(2)
 		}
 		fmt.Fprintf(os.Stderr, "memory-guard serving on %s\n", *socket)
-		if err := serve(*socket, NewMemoryGuard(nil)); err != nil {
+		if err := serve(*socket, NewMemoryGuard(NewNativeDetector())); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
 	case "write":
-		g := NewMemoryGuard(nil)
+		g := NewMemoryGuard(NewNativeDetector())
 		printJSON(g.ValidateWrite(arg(2), nil))
 	case "read":
-		g := NewMemoryGuard(nil)
+		g := NewMemoryGuard(NewNativeDetector())
 		g.ValidateWrite(arg(2), nil) // seed so the one-shot demo has something to read
 		printJSON(g.ValidateRead(arg(2), nil))
 	default:

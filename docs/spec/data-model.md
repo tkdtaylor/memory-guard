@@ -59,10 +59,12 @@ type entry struct {
   }
   ```
 
-  This is the boundary that isolates the detection backend (Presidio) from the rest of the block. No
-  backend-specific type crosses it — only `string` in, `string` + `[]string` out. The default is
-  `RegexDetector`; a Presidio-backed detector (sidecar / ONNX) or a Go-native NER model replaces it
-  **behind this interface** with no guard/IPC/contract change (ADR-001 §3).
+  This is the boundary that isolates the detection backend from the rest of the block. No
+  backend-specific type crosses it — only `string` in, `string` + `[]string` out. Two
+  implementations ship: `RegexDetector` (the v0 stand-in / parity baseline) and `NativeDetector`
+  (the v1 production backend chosen by the memory-guard tracer — Go-native, in-process, zero new
+  dependencies; ADR-002). A Presidio-backed detector (sidecar / ONNX) is deferred but still replaces
+  either **behind this interface** with no guard/IPC/contract change (ADR-001 §3, ADR-002).
 
 - **`RegexDetector`** (`detector.go`): the v0 stand-in. `pii []labeledPattern` (label + compiled
   regex) and `injection []*regexp.Regexp`.
@@ -77,6 +79,13 @@ type entry struct {
 
   `RedactPII` replaces each matching category in place and appends a `pii:<LABEL>` flag per category
   found. `DetectInjection` returns `["injection_suspected"]` on the first matching pattern, else `nil`.
+
+- **`NativeDetector`** (`detector.go`): the v1 production backend (ADR-002) — Go-native, in-process,
+  zero new dependencies. It reaches parity with `RegexDetector` on the v0 categories/patterns by
+  composing the same recognizers internally (`base *RegexDetector`), and is the CLI / `serve` default
+  (`NewMemoryGuard(NewNativeDetector())` in `main.go`). It is a distinct, swappable `Detector`;
+  broadening recall (task 004) is detector-internal behind `RedactPII`, with no guard/IPC/contract
+  impact. Measured detection cost ~5.6 µs per `validate_*` op (budget `< 1 ms`).
 
 ---
 

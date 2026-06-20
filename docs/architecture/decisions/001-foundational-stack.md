@@ -64,8 +64,9 @@ The v0 `RegexDetector` is a pure-Go stand-in for Presidio — a few high-signal 
 US_SSN, CREDIT_CARD, API_KEY; ignore/disregard-instructions, system-prompt, `<system>`/`<instructions>`
 tags). A Presidio-backed detector (sidecar/subprocess or ONNX runtime) or a Go-native NER model can
 replace it **without touching the guard, the contract, or the IPC**. "Adopt the tool behind a seam;
-don't let it dictate the substrate." The detector deployment shape and the hot-path latency budget are
-**not decided here** — they are settled in the memory-guard tracer (§ Open questions).
+don't let it dictate the substrate." The detector deployment shape and the hot-path latency budget were
+left open here and are now **resolved by [ADR-002](002-detector-backend.md)**: a Go-native, in-process
+backend (`NativeDetector`), zero new dependencies, measured ~5.6 µs detection cost per `validate_*` op.
 
 ### 4. Interface contract — `validate_read` / `validate_write` / `verify_delete` (the v0 contract)
 
@@ -133,9 +134,12 @@ inbound=outbound under the DCO (no CLA, `git commit -s` sign-off required).
 
 ## Open questions
 
-- **`Detector` backend** — Presidio-as-sidecar vs. Presidio-via-ONNX in-process vs. a Go-native NER
-  model, **and** the hot-path latency budget the choice must fit. **Not decided here** — settled in
-  the memory-guard tracer (the same way the first tracer settled the vault↔exec-sandbox handoff).
+- ~~**`Detector` backend** — Presidio-as-sidecar vs. Presidio-via-ONNX in-process vs. a Go-native NER
+  model, **and** the hot-path latency budget the choice must fit.~~ **RESOLVED by
+  [ADR-002](002-detector-backend.md)** (memory-guard tracer, task 001): a Go-native, **in-process**
+  backend with **zero new dependencies**, measured ~5.6 µs detection cost per `validate_*` op (the
+  ADR-002 budget is `< 1 ms`). Presidio-as-sidecar and Presidio-via-ONNX are deferred, not foreclosed —
+  they still slot in additively behind the unchanged seam.
 - **Post-deletion residue detection method** — exact-substring (credentials) vs. embedding-based
   semantic matching vs. Bloom-filter deleted-content signatures, for the v1 "gone from every
   index/copy" proof. TBD in the tracer.

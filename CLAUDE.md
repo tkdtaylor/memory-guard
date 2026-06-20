@@ -50,15 +50,17 @@ memory is in play, which may refine these shapes. This v0 is a skeleton against 
 shape, not yet tracer-validated. The full as-built record is
 [ADR-001](docs/architecture/decisions/001-foundational-stack.md).
 
-## Open decision — the `Detector` backend (settle it in the memory-guard tracer)
+## Resolved — the `Detector` backend (memory-guard tracer, [ADR-002](docs/architecture/decisions/002-detector-backend.md))
 
-The **`Detector` backend** is deliberately *unresolved* at v0 (v0 `RegexDetector` → Presidio-as-
-sidecar vs. Presidio-via-ONNX in-process vs. a Go-native NER model). Resolve it in the memory-guard
-tracer-bullet — the same way the first tracer settled the vault↔exec-sandbox credential handoff. What
-that tracer must decide: detector deployment shape (sidecar vs. in-process), the latency budget on
-the read/write hot path, and the adversarial-poisoning test-suite the write-gate is measured against.
-Until then, keep everything Presidio-specific behind the `Detector` seam so this choice stays cheap to
-make.
+The **`Detector` backend** decision is **resolved (see [ADR-002](docs/architecture/decisions/002-detector-backend.md))**:
+a **Go-native, in-process** backend (`NativeDetector` in `detector.go`), **zero new third-party
+dependencies** (stays inside the Go stdlib — the v0 stdlib-only property holds), measured **~5.6 µs
+detection cost per `validate_*` op** (the budget is `< 1 ms`). Presidio-as-sidecar and
+Presidio-via-ONNX are **deferred, not foreclosed** — they still slot in additively behind the unchanged
+`Detector` seam if a future requirement demands Presidio-grade NER recall. Keep everything backend-
+specific behind the `Detector` seam, exactly as before: the seam is what made this choice cheap to make
+and keeps it cheap to revisit. The remaining open tracer items (the adversarial-poisoning test-suite and
+the v1 residue-detection method) are tracked as their own tasks/ADRs.
 
 ## Project structure
 
