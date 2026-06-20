@@ -1,3 +1,6 @@
 /bin/
 *.sock
 /memory-guard
+.claude/sessions/
+.claude/worktrees/
+.claude/.last-checkpoint
