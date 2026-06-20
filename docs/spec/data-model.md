@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-06-19
+**Last updated:** 2026-06-19 (task 004)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 is **in-memory only** in v0 — a Go `map` that holds each entry's **redacted** content (PII already
@@ -66,16 +66,31 @@ type entry struct {
   dependencies; ADR-002). A Presidio-backed detector (sidecar / ONNX) is deferred but still replaces
   either **behind this interface** with no guard/IPC/contract change (ADR-001 §3, ADR-002).
 
-- **`RegexDetector`** (`detector.go`): the v0 stand-in. `pii []labeledPattern` (label + compiled
-  regex) and `injection []*regexp.Regexp`.
+- **`RegexDetector`** (`detector.go`): the v0/v1 stand-in, broadened in task 004. `pii []labeledPattern`
+  (label + compiled regex) and `injection []*regexp.Regexp`.
 
-  | Category | Label | v0 recognizer (regex, high-signal) |
-  |----------|-------|-------------------------------------|
-  | PII | `EMAIL` | `[\w.+-]+@[\w-]+\.[\w.-]+` |
-  | PII | `US_SSN` | `\b\d{3}-\d{2}-\d{4}\b` |
-  | PII | `CREDIT_CARD` | `\b(?:\d[ -]?){13,16}\b` |
-  | PII | `API_KEY` | `\b(?:sk\|AKIA\|ghp\|xox[baprs])[-_A-Za-z0-9]{8,}` |
-  | Injection | — | `(?i)ignore … instructions`, `(?i)disregard … instructions`, `(?i)system prompt`, `(?i)</?(?:system\|instructions)>` |
+  Recognizer table (v0 = initial set; v1 = added in task 004).  Corpus recall and precision numbers
+  are from the `TestCorpusRecallPrecision` harness in `detector_corpus_test.go`
+  (run `go test -v -run TestCorpusSummary` to reproduce).
+
+  | Ver | Category | Label | Pattern intent | Recall | Precision |
+  |-----|----------|-------|---------------|--------|-----------|
+  | v0 | PII | `EMAIL` | `[\w.+-]+@[\w-]+\.[\w.-]+` — user@host.tld | 1.00 (2/2) | 1.00 |
+  | v0 | PII | `US_SSN` | `\b\d{3}-\d{2}-\d{4}\b` — NNN-NN-NNNN with hyphens | 1.00 (2/2) | 1.00 |
+  | v0 | PII | `CREDIT_CARD` | `\b(?:\d[ -]?){13,16}\b` — 13–16 digit run (spaces/hyphens OK) | 1.00 (2/2) | 1.00 |
+  | v0+v1 | PII | `API_KEY` | `\b(?:sk-ant\|sk\|AKIA\|ghp\|xox[baprs]\|hf_\|npm_\|pat_\|xp_)[-_A-Za-z0-9]{8,}` — common credential prefixes (v0: sk/AKIA/ghp/xox; v1 adds sk-ant/hf_/npm_/pat_/xp_) | 1.00 (8/8) | 1.00 |
+  | v1 | PII | `PHONE` | `\b(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b` — US phone with separators | 1.00 (4/4) | 1.00 |
+  | v1 | PII | `IBAN` | `\b[A-Z]{2}\d{2}[A-Z0-9]{4,30}\b` — 2-letter country + 2-digit check + ≥4 alphanums (≥8 total) | 1.00 (3/3) | 1.00 |
+  | v1 | PII | `IP_ADDRESS` | Strict IPv4 (4 octets, 0–255 each) or IPv6 (full/compressed) | 1.00 (7/7) | 1.00 |
+  | v1 | PII | `DOB` | MM/DD/YYYY, YYYY-MM-DD (ISO 8601), or DD Mon YYYY — 19xx/20xx years only | 1.00 (6/6) | 1.00 |
+  | v1 | PII | `CREDENTIAL` | `\b[0-9a-fA-F]{32,}\b` — bare hex strings ≥32 chars (raw secrets/tokens; UUIDs excluded because their hyphens break the run) | 1.00 (2/2) | 1.00 |
+  | v0 | Injection | — | `(?i)ignore … instructions`, `(?i)disregard … instructions`, `(?i)system prompt`, `(?i)</?(?:system\|instructions)>` | — | — |
+
+  **Overall corpus precision: 1.00 (0 FP / 9 hard negatives).** Hard negatives in the corpus:
+  9-digit order number (not SSN), `v1.2.3` 3-part semver (not IP — requires 4 octets), UUID with
+  hyphens (not CREDENTIAL — hyphens break continuous hex runs), `#1a2b3c` short hex color (not
+  CREDENTIAL — under 32 chars), `867530` bare 6-digit string (not PHONE — requires separators),
+  two benign sentences.
 
   `RedactPII` replaces each matching category in place and appends a `pii:<LABEL>` flag per category
   found. `DetectInjection` returns `["injection_suspected"]` on the first matching pattern, else `nil`.
