@@ -743,6 +743,27 @@ func TestPoisoningHardBenignFalsePositives(t *testing.T) {
 					t.Logf("[%s] %s", d.name, note)
 				}
 
+				// Assert a precision floor on the hard-benign subset (TC-004).
+				//
+				// Hard-benign precision threshold (honest baseline, 2026-06-19):
+				//   Measured: 0.43 (3 TN / 7 hard-benign; 4 known FPs on "system prompt" / <system>
+				//   in technical context — v0 regex fires on these by design).
+				//   Threshold set at 0.40: ~7 pp below measured, giving a regression floor without
+				//   being fragile to minor corpus additions. A future backend that reduces "system
+				//   prompt" FPs must raise this threshold in the same commit (alongside updating
+				//   docs/spec/fitness-functions.md F-006).
+				//
+				// Note: this is LOWER than the system-wide precision threshold (0.55 in
+				// backendThresholds) because the hard-benign subset is intentionally adversarial —
+				// it contains cases designed to resemble injection vocabulary and the v0 regex
+				// trades FP rate here for simplicity. The system-wide number is better because the
+				// benign corpus also contains easy ordinary cases.
+				const hardBenignPrecisionThreshold = 0.40
+				if precision < hardBenignPrecisionThreshold {
+					t.Errorf("[%s] hard-benign precision %.2f < threshold %.2f (%d FP on %d hard-benign cases) — precision regression",
+						d.name, precision, hardBenignPrecisionThreshold, fpCount, len(hardBenign))
+				}
+
 				// The "ignore the typo in the previous line" case must not fire (TC-004 specific edge).
 				for _, s := range hardBenign {
 					if strings.Contains(s.note, "editorial note") {
