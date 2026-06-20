@@ -15,10 +15,10 @@ import (
 
 // corpusSample is a single labelled entry in the PII corpus.
 type corpusSample struct {
-	text          string // input text (synthetic PII only)
-	category      string // expected PII category label, or "none" for hard negatives
-	expectRedact  bool   // true = the text should be redacted (positive), false = hard negative
-	allowedOver   string // non-empty = over-match is deliberately accepted with this rationale
+	text         string // input text (synthetic PII only)
+	category     string // expected PII category label, or "none" for hard negatives
+	expectRedact bool   // true = the text should be redacted (positive), false = hard negative
+	allowedOver  string // non-empty = over-match is deliberately accepted with this rationale
 }
 
 // piiCorpus is the full labelled corpus: positives per category + hard negatives.
@@ -140,7 +140,7 @@ func TestCorpusPositivesRedactAndFlag(t *testing.T) {
 // TC-002: recall/precision harness — per-category recall must meet the threshold and be
 // recorded. A category with zero detections (recall = 0) fails the suite.
 func TestCorpusRecallPrecision(t *testing.T) {
-	const recallThreshold = 0.80  // per-category: at least 80% of positives detected
+	const recallThreshold = 0.80    // per-category: at least 80% of positives detected
 	const precisionThreshold = 0.80 // overall: at most 20% of hard-negative matches are FPs
 
 	for _, det := range []struct {
