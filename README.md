@@ -1,8 +1,6 @@
 # memory-guard — context-poisoning & memory-I/O defense (ASI06)
 
-Gates every memory read and write an agent performs. PII never lands in stored context
-unredacted; poisoned writes are flagged and rejected at ingestion; and deletions are
-**verified** — the industry gap most memory stores skip.
+Gates every memory read and write an agent performs. PII never lands in stored context unredacted; poisoned writes are flagged and rejected at ingestion; and deletions are **verified** — the industry gap most memory stores skip.
 
 - **Write-gate (built delta)** — flag/reject context-poisoning at ingestion (fail-closed on suspected injection)
 - **PII redaction** — recognizers redact emails/SSNs/cards/API-keys before storage
@@ -46,15 +44,17 @@ go run . serve --socket /run/memguard.sock          # IPC daemon
 IPC: `{"op":"validate_write","entry":"…"}` · `{"op":"validate_read","query":"…"}` ·
 `{"op":"verify_delete","id":"…"}` · `{"op":"ping"}`.
 
+## Documentation
+
+- [docs/architecture/overview.md](docs/architecture/overview.md) — system design and design principles
+- [docs/architecture/diagrams.md](docs/architecture/diagrams.md) — C4 diagrams and runtime flows
+- [docs/spec/SPEC.md](docs/spec/SPEC.md) — authoritative spec
+- [docs/plans/roadmap.md](docs/plans/roadmap.md) — roadmap and current status
+- [docs/CONTRACT.md](docs/CONTRACT.md) — contract reference
+
 ## Status
 
-🚧 **v0.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning
-test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go
-`Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), in-memory store
-(MemoryStore stand-in), and post-deletion verification with residue detection + deletion-hash.
-**Deferred (v1):** Presidio-backed `Detector` (sidecar/ONNX), real MemoryStore backends,
-identity-scoped access, audit-trail emission. See [docs/CONTRACT.md](docs/CONTRACT.md) and the
-scoping doc.
+🚧 **v0.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), in-memory store (MemoryStore stand-in), and post-deletion verification with residue detection + deletion-hash. See the [roadmap](docs/plans/roadmap.md) for deferred work and planned features.
 
 ## Adapter seam & standards
 
