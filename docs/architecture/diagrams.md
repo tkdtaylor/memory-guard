@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-06-19 (task 003 — verify_delete residue scan, ADR-003)
+**Last updated:** 2026-06-21 (task 003 — verify_delete residue scan, ADR-003)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -138,7 +138,7 @@ sequenceDiagram
     Note over Agent,Store: verify_delete proves absence AND scans survivors for residue
     Agent->>IPC: {"op":"verify_delete","id":"mem-…"}
     IPC->>Guard: VerifyDelete("mem-…")
-    Guard->>Store: delete(id); re-check presence; scan survivors for residue (ADR-003)
+    Guard->>Store: delete(id), re-check presence, scan survivors for residue (ADR-003)
     Guard-->>IPC: { confirmed:true, residue_detected:bool, residue_summary?, deletion_hash }
     IPC-->>Agent: { confirmed:true, residue_detected:…, deletion_hash:… }
 ```
