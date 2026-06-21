@@ -12,6 +12,17 @@ unredacted; poisoned writes are flagged and rejected at ingestion; and deletions
 >
 > **Language: Go.** The block itself (contract, write-gate orchestration, delete-verification, IPC, hot-path gate) is Go — uniform with the rest of the ecosystem, single static binary, low per-call overhead on a path that gates *every* memory op. The one Python-leaning dependency (Presidio) is isolated **behind the `Detector` seam** ([detector.go](detector.go)): v0 ships pure-Go detectors (`RegexDetector` and the Go-native `NativeDetector`, the resolved backend per [ADR-002](docs/architecture/decisions/002-detector-backend.md)); a Presidio-backed detector (sidecar/subprocess or ONNX runtime) is deferred-not-foreclosed and slots in behind the same seam without touching the guard or contract. *Adopt the tool behind a seam; don't let it dictate the substrate.* **License: Apache-2.0.**
 
+## Scope
+
+**What memory-guard does:** defense for what gets written into agent memory/context — PII detection plus poisoning/injection screening at the memory-write boundary (ASI06).
+
+**What it does *not* do (and which sibling owns it instead):**
+- Guard the inbound prompt / tool-call boundary → **armor** (armor guards what comes in; memory-guard guards what gets stored)
+- Store or broker secrets → **vault**
+- Authorize actions → **policy-engine**
+
+`memory-guard` is one block in a composable secure-agent ecosystem — each block is standalone and independently usable, and composes with its siblings over published contracts rather than absorbing their responsibilities (no central "god object").
+
 ## Contract (interface-contracts.md §2)
 
 ```
@@ -68,7 +79,6 @@ Need hardened deployments, integration help, or a support SLA? **Commercial supp
 memory-guard is independent, open-source security tooling. If it saves you time or risk, consider sponsoring continued development:
 
 - 💜 [GitHub Sponsors](https://github.com/sponsors/tkdtaylor)
-<!-- - 🤝 [Open Collective](https://opencollective.com/memory-guard)  (uncomment once the collective exists) -->
 
 ## Contributing
 
