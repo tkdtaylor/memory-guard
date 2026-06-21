@@ -1,4 +1,6 @@
-# Architecture Overview — memory-guard
+# Architecture Overview
+
+**Project:** memory-guard
 
 **Last updated:** 2026-06-19
 
