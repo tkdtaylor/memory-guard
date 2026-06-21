@@ -125,7 +125,7 @@ stated as facts, not a roadmap (planned work lives in `docs/plans/` / `docs/task
 ## Design principles
 
 memory-guard follows **Unix philosophy** — composability over monolithic design. The full statement
-lives in `CLAUDE.md`; the load-bearing instance here is the `Detector` seam: a small, well-defined
+lives in `AGENTS.md`; the load-bearing instance here is the `Detector` seam: a small, well-defined
 interface that lets an independently-evolving detection backend plug in without entanglement, so the
 substrate (Go) stays independent of the detection tool (Presidio). The write-gate orchestration inside
 `MemoryGuard` is deliberately cohesive (a monolithic choice for hot-path correctness) — composability
