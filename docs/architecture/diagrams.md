@@ -112,17 +112,17 @@ sequenceDiagram
         IPC->>Guard: ValidateWrite(entry, identity)
         Guard->>Det: DetectInjection(entry)
         alt injection_suspected (context poisoning)
-            Det-->>Guard: ["injection_suspected"]
+            Det-->>Guard: ("injection_suspected")
             Note over Guard: WRITE-GATE FAIL-CLOSED — do NOT store
-            Guard-->>IPC: { allow:false, stored_id:null, flags:[…,"injection_suspected"] }
-            IPC-->>Agent: { allow:false, stored_id:null, flags:[…] }
+            Guard-->>IPC: { allow:false, stored_id:null, flags:(…,"injection_suspected") }
+            IPC-->>Agent: { allow:false, stored_id:null, flags:(…) }
         else clean
             Det-->>Guard: nil
             Guard->>Det: RedactPII(entry)
-            Det-->>Guard: redacted, ["pii:EMAIL",…]
-            Guard->>Store: store[ "mem-"+randHex(6) ] = { redacted, identity, flags }
-            Guard-->>IPC: { allow:true, stored_id:"mem-…", flags:[…] }
-            IPC-->>Agent: { allow:true, stored_id:"mem-…", flags:[…] }
+            Det-->>Guard: redacted, ("pii:EMAIL",…)
+            Guard->>Store: store key "mem-"+randHex(6) = { redacted, identity, flags }
+            Guard-->>IPC: { allow:true, stored_id:"mem-…", flags:(…) }
+            IPC-->>Agent: { allow:true, stored_id:"mem-…", flags:(…) }
             Note over Agent: agent gets an opaque stored_id, never the raw value
         end
     end
@@ -132,8 +132,8 @@ sequenceDiagram
     IPC->>Guard: ValidateRead("contact", identity)
     Guard->>Store: scan for entries containing the query
     Guard->>Det: RedactPII(join(hits))
-    Guard-->>IPC: { allow:true, content_redacted:"…<EMAIL>…", flags:[…] }
-    IPC-->>Agent: { allow:true, content_redacted:"…", flags:[…] }
+    Guard-->>IPC: { allow:true, content_redacted:"…<EMAIL>…", flags:(…) }
+    IPC-->>Agent: { allow:true, content_redacted:"…", flags:(…) }
 
     Note over Agent,Store: verify_delete proves absence AND scans survivors for residue
     Agent->>IPC: {"op":"verify_delete","id":"mem-…"}
