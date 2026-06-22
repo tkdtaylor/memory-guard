@@ -15,9 +15,9 @@ Gates every memory read and write an agent performs. PII never lands in stored c
 **What memory-guard does:** defense for what gets written into agent memory/context — PII detection plus poisoning/injection screening at the memory-write boundary (ASI06).
 
 **What it does *not* do (and which sibling owns it instead):**
-- Guard the inbound prompt / tool-call boundary → **armor** (armor guards what comes in; memory-guard guards what gets stored)
-- Store or broker secrets → **vault**
-- Authorize actions → **policy-engine**
+- Guard the inbound prompt / tool-call boundary → **[armor](https://github.com/tkdtaylor/armor)** (armor guards what comes in; memory-guard guards what gets stored)
+- Store or broker secrets → **[vault](https://github.com/tkdtaylor/vault)**
+- Authorize actions → **[policy-engine](https://github.com/tkdtaylor/policy-engine)**
 
 `memory-guard` is one block in a composable secure-agent ecosystem — each block is standalone and independently usable, and composes with its siblings over published contracts rather than absorbing their responsibilities (no central "god object").
 
