@@ -25,12 +25,12 @@
 
 ## Pre-implementation checklist
 
-- [ ] All test cases below are defined
-- [ ] Expected inputs and outputs are specified for each case
-- [ ] Edge cases and error paths are covered
-- [ ] Every REQ-ID from the task has at least one test case
-- [ ] Task 002's `adversarialCorpus` is used **unchanged** as the recall-lift bar
-- [ ] The v0/v1 detector tests (`TestNativeDetectorHotPathLatency`, parity tests) remain green
+- [x] All test cases below are defined
+- [x] Expected inputs and outputs are specified for each case
+- [x] Edge cases and error paths are covered
+- [x] Every REQ-ID from the task has at least one test case
+- [x] Task 002's `adversarialCorpus` is used **unchanged** as the recall-lift bar (injection recall measured UNCHANGED native=presidio; the PII/NER lift is measured on the PII corpus — see ADR-009 finding 1)
+- [x] The v0/v1 detector tests (`TestNativeDetectorHotPathLatency`, parity tests) remain green
 
 ## Test fixtures
 

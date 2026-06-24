@@ -75,8 +75,10 @@ Emission is **default-DISABLED** (pending confirmation of the sibling audit-trai
 and **PII-safe** (no raw PII in any emitted event). The `AuditSink` seam (`audit.go`) is the extension
 point; swapping the transport is a one-implementation change with zero guard/IPC/contract impact.
 
-A Presidio-backed `Detector` (v1) would call out to a sidecar/subprocess or load an ONNX model —
-that call lives **behind the `Detector` interface**, not as a contract-level outbound.
+The Presidio-backed `Detector` (v1, ADR-009, opt-in via `MEMGUARD_DETECTOR=presidio`) calls out to a
+Python **sidecar** subprocess over stdlib JSON IPC — that call lives **behind the `Detector`
+interface**, not as a contract-level outbound. The ONNX-in-process alternative is deferred behind the
+same seam.
 
 ---
 
@@ -125,7 +127,29 @@ func (d *RegexDetector) DetectInjection(text string) []string
 func NewNativeDetector() *NativeDetector                        // v1 production backend (ADR-002): Go-native, in-process, zero new deps; CLI/serve default
 func (d *NativeDetector) RedactPII(text string) (string, []string)
 func (d *NativeDetector) DetectInjection(text string) []string
+
+func NewPresidioDetector(cfg presidioConfig) *PresidioDetector  // v1 opt-in (ADR-009): Presidio Python SIDECAR; composite = native structured PII + Presidio NER; injection delegated to native UNCHANGED
+func (d *PresidioDetector) RedactPII(text string) (string, []string)  // native structured redaction + Presidio NER overlay (PERSON/LOCATION/...); fail-closed to native on sidecar-down
+func (d *PresidioDetector) DetectInjection(text string) []string      // delegates to native heuristic UNCHANGED (Presidio is a PII/NER engine, not an injection classifier)
+func (d *PresidioDetector) Start() error                              // spawns + warms the sidecar (one-time model-load cold-start); fail returns err, RedactPII then runs native-only
+func (d *PresidioDetector) Close() error                              // terminates the sidecar subprocess
+
+func NewDetectorFromConfig(backend string) (Detector, error)   // config-driven selection: "regex" | "native" | "presidio" (MEMGUARD_DETECTOR); unknown name → fail-closed error
 ```
+
+- **`NewDetectorFromConfig` is the single backend-selection point** (`detector_config.go`): it maps a
+  generic backend NAME (`MEMGUARD_DETECTOR`) to a `Detector`. `main.go` names only the backend string +
+  this factory — **no backend Go type** (`PresidioDetector`, etc.) appears in `main.go` / `guard.go` /
+  `ipc.go` / `CONTRACT.md`, keeping the seam-isolation fitness gate (F-004) clean. An unknown name is a
+  fail-closed construction error (exit `2`), not a silent fallback.
+- **`PresidioDetector` is the opt-in third backend** (ADR-009): a **sidecar** (Python subprocess,
+  `presidio/sidecar.py`) reached over stdlib JSON IPC — the Go binary stays pure-Go / stdlib-only
+  (`go.mod` require-free). It **composes** the native structured recognizers (preserving every PII
+  category + the injection heuristic) with Presidio's NER (PERSON / LOCATION / NRP / ... — the recall
+  lift). It lifts **PII/NER** recall; **injection** recall is **unchanged** (orthogonal — delegated to
+  native). `< 1 ms` is the native default's budget; the Presidio sidecar is **~ms/op** under a revised
+  rich-backend budget (ADR-009). On a sidecar-unavailable path it **fails closed** to native structured
+  redaction — PII still redacted, never raw — surfacing no Presidio-typed error past the seam.
 
 ### Type: `Principal` — the identity seam (ADR-004)
 

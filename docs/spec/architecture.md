@@ -40,9 +40,11 @@ Note: memory-guard guards what gets **stored**; `armor` guards what **enters** t
 
 **Invariants for this table**
 - The single container corresponds to the one Go `package main` (the single-binary layout, ADR-001 §2).
-- Runtime dependencies are **the Go standard library only** — no third-party modules in v0. The first
-  external dependency will be the Presidio-backed `Detector` (sidecar SDK / ONNX runtime / NER model),
-  a future ADR; on adoption it makes `dep-scan` / `code-scanner` blocking gates.
+- **Go** runtime dependencies are **the Go standard library only** — `go.mod` stays `require`-free. The
+  first third-party dependency (the Presidio backend, ADR-009) is realized as an **out-of-process Python
+  sidecar**, so it adds **no Go module** — the single-static-Go-binary property holds. The sidecar's
+  pinned Python deps cleared `dep-scan` (all security checks pass; informational provenance WARN
+  accepted) and are opt-in (`MEMGUARD_DETECTOR=presidio`).
 
 ---
 
@@ -54,7 +56,8 @@ Note: memory-guard guards what gets **stored**; `armor` guards what **enters** t
 | memory-guard binary | IPC server | `ipc.go` | `serve`: remove a stale socket, bind the `0600` Unix socket, frame newline-delimited JSON, dispatch `validate_write`/`validate_read`/`verify_delete`/`ping` over a shared `*MemoryGuard` (goroutine per connection); structured error shape `{error:{code,message,retryable}}` (`bad_request`/`unknown_op`) | MemoryGuard core |
 | memory-guard binary | MemoryGuard core | `guard.go` | Holds a `MemoryStore` (the seam, behind a `sync.Mutex`) + `ValidateWrite` (write-gate: `DetectInjection` → fail-closed on `injection_suspected` → `RedactPII` → `store.Put`), `ValidateRead` (`store.Scan` → `RedactPII`), `VerifyDelete` (`store.Delete` → re-check absence via `store.Get` → residue scan over `store.All()` survivors → `deletion_hash`, returning `{confirmed, residue_detected, residue_summary?, deletion_hash}`); mints the opaque `stored_id` (`mem-<hex>`) from `crypto/rand`. The value-add the block owns | Detector seam, MemoryStore seam, residue scan |
 | memory-guard binary | MemoryStore seam | `store.go` | The `MemoryStore` interface (`Put` / `Get` / `Delete` / `Scan` / `All`) + two stdlib backings — `InMemoryStore` (the default single `map[string]entry`) and `TwoIndexStore` (a primary `id→entry` map PLUS a secondary `content→ids` index; `Delete` purges both). The boundary that isolates the storage backend; only `string`/`entry`/`[]entry` cross it, so a swap is one-line with no guard/IPC/contract change (ADR-005) | — (stdlib only) |
-| memory-guard binary | Detector seam | `detector.go` | The `Detector` interface (`RedactPII` / `DetectInjection`) + the v0 pure-Go backends (`RegexDetector` and the Go-native `NativeDetector`, the resolved backend per ADR-002): PII recognizers (EMAIL, US_SSN, CREDIT_CARD, API_KEY → `<LABEL>` + `pii:<LABEL>` flags) and injection patterns (ignore/disregard-instructions, `system prompt`, `<system>`/`<instructions>` tags → `["injection_suspected"]`). The Presidio stand-in; the boundary that isolates the detection backend | — (stdlib `regexp` only) |
+| memory-guard binary | Detector seam | `detector.go`, `detector_config.go`, `detector_presidio.go` | The `Detector` interface (`RedactPII` / `DetectInjection`) + three backends selected by `NewDetectorFromConfig` (`MEMGUARD_DETECTOR`): `RegexDetector` and the Go-native `NativeDetector` (ADR-002 default, stdlib `regexp`), plus the opt-in `PresidioDetector` (ADR-009) — a composite of native structured PII + Presidio NER, talking to the Python sidecar over stdlib JSON IPC; injection delegated to native UNCHANGED. The boundary that isolates the detection backend (no backend type leaks past the seam) | Presidio sidecar (opt-in); else — (stdlib only) |
+| **Presidio sidecar** (external, opt-in) | Presidio analyzer subprocess | `presidio/sidecar.py` | Out-of-process Python: loads spaCy NER + Presidio recognizers ONCE (warm process), serves `{"op":"analyze","text":…}` → entity spans over newline-delimited JSON on stdin/stdout. NO outbound network at runtime. Pinned base-only deps (presidio-analyzer/anonymizer 2.2.362, spacy 3.8.14, en_core_web_lg 3.8.0). Reached ONLY behind the `Detector` seam | presidio-analyzer, spaCy (pinned, scanned) |
 | memory-guard binary | Residue scan | `residue.go` | Post-deletion residue detection (normalized substring/token match for surviving fragments of deleted content per ADR-003) + the deterministic `deletion_hash` (SHA-256 over `id`+content for audit-trail linkage). Invoked by `VerifyDelete`; not a Detector concern | — (stdlib `crypto/sha256`, `regexp` only) |
 
 ---
@@ -65,9 +68,10 @@ Note: memory-guard guards what gets **stored**; `armor` guards what **enters** t
   entry never persists. ([ADR-001](../architecture/decisions/001-foundational-stack.md) §1)
 - **PII redacted before storage and again on read** — the raw PII never enters the store and never
   appears in a response. (ADR-001 §1)
-- **`Detector` seam isolates the detection backend** — the v0 `RegexDetector` can be swapped for a
-  Presidio-backed detector (sidecar / ONNX) or a Go-native NER model without changing the guard, the
-  contract, or the IPC. (ADR-001 §3)
+- **`Detector` seam isolates the detection backend** — `RegexDetector` / the Go-native `NativeDetector`
+  (default) / the opt-in Presidio sidecar (ADR-009) are all selectable behind the seam (config-driven
+  via `MEMGUARD_DETECTOR`) without changing the guard, the contract, or the IPC; no backend type leaks
+  past the seam. (ADR-001 §3, ADR-002, ADR-009)
 - **Post-deletion verification** — `VerifyDelete` proves absence (re-checks the in-memory store) and
   scans surviving entries for residue of the deleted content, returning a `deletion_hash` for
   audit-trail linkage; never a bare `delete()`. v0 ships residue detection (normalized

@@ -178,9 +178,15 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   delete and reports `confirmed` from that fresh check — never an assumed success from the `delete()`
   call — and additionally scans the remaining entries for a surviving fragment of the deleted content
   (`residue_detected`), the documented industry gap. A deleted entry never flags itself.
-- **The detection backend is isolated behind the `Detector` seam.** All PII + injection detection goes
-  through the `Detector` interface; the guard, the IPC, and the contract carry no backend-specific
-  detail.
+- **The detection backend is isolated behind the `Detector` seam, and is selectable.** All PII +
+  injection detection goes through the `Detector` interface; the guard, the IPC, and the contract carry
+  no backend-specific detail. The backend is chosen by `MEMGUARD_DETECTOR` (`native` default / `regex` /
+  `presidio`). The **set of `pii:<LABEL>` flags a write can return depends on the selected backend**:
+  the native/regex backends emit the structured categories (EMAIL / US_SSN / CREDIT_CARD / API_KEY /
+  PHONE / IBAN / IP_ADDRESS / DOB / CREDENTIAL); the opt-in Presidio backend (ADR-009) emits those
+  **plus** NER categories (PERSON / LOCATION / NRP / DATE_TIME / …). Injection detection is identical
+  across all three backends (the Presidio backend delegates `DetectInjection` to the native heuristic
+  unchanged — it lifts PII/NER recall, not injection recall).
 - **Every malformed / unknown request fails closed.** An unparseable request or an unknown op returns
   the structured error shape; nothing is stored or returned.
 - **Reads are identity-scoped (fail-closed w.r.t. bound entries).** A writer's entry is visible only to
