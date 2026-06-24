@@ -59,21 +59,25 @@ These are load-bearing — violating one breaks the security model, not just sty
   value-add (write-gate + delete-verification) is orchestration, not NLP. *(Enforced
   by the language / single-binary layout.)*
 
-## Contract (v0 shape — not yet tracer-validated)
+## Contract (tracer-validated)
 
 ```
 validate_read(query, identity)  -> { allow, content_redacted, flags }
-validate_write(entry, identity) -> { allow, stored_id, flags }    # write-gate: fail-closed on poisoning
-verify_delete(id)               -> { confirmed }                  # post-deletion verification (the industry gap)
+validate_write(entry, identity) -> { allow, stored_id, flags }                              # write-gate: fail-closed on poisoning
+verify_delete(id)               -> { confirmed, residue_detected, residue_summary?, deletion_hash }  # post-deletion verification (the industry gap)
 ```
 
-Mirrors `interface-contracts.md §2` and the scoping
-doc `memory-guard.md`. memory-guard was **out of the
-first tracer-bullet's scope** (the slice is stateless, tracer-bullet.md §6) — its
-contract gets **its own tracer** once memory is in play, which may refine these
-shapes. This v0 is a skeleton against the v0 contract shape, not yet tracer-
-validated. The full as-built record is
-[ADR-001](docs/architecture/decisions/001-foundational-stack.md).
+Mirrors `interface-contracts.md §2` and the scoping doc `memory-guard.md`. These
+shapes are **tracer-validated**: memory-guard's own tracer-bullet (roadmap T6,
+[ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)) drives
+`validate_write → validate_read → verify_delete` over the live `serve` Unix socket
+against the real `MemoryStore` seam, asserting each verb's response field-by-field on
+the JSON decoded off the socket; the shapes validated **unchanged**. The detector
+dimension was validated against the v0 `NativeDetector` — a real-Presidio
+re-validation is a noted follow-up, and the shapes are detector-agnostic behind the
+`Detector` seam. The full as-built record is
+[ADR-001](docs/architecture/decisions/001-foundational-stack.md);
+[`docs/CONTRACT.md`](docs/CONTRACT.md) is the canonical contract.
 
 The **`Detector` backend** decision is **resolved (see
 [ADR-002](docs/architecture/decisions/002-detector-backend.md))**: a **Go-native,
