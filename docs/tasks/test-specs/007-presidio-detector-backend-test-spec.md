@@ -5,11 +5,14 @@
 
 > Authored ahead of execution. The seam-isolation (TC-006), seam-swap (TC-007), and interface-parity
 > (TC-001) cases are **unit-verifiable locally** against the unchanged `Detector` interface. The
-> **recall-lift** bar (TC-002) runs against task 002's **unchanged** `adversarialCorpus` and asserts
-> **recall > 0.69**. The **latency** re-validation (TC-003) and the **dep-scan/code-scanner** gate
+> **recall-lift** bar (TC-002) measures a **PII/NER recall lift on the PII corpus** (Presidio's real
+> domain) while holding **injection recall UNCHANGED** on task 002's **unchanged** `adversarialCorpus`.
+> The **latency** re-validation (TC-003) and the **dep-scan/code-scanner** gate
 > (TC-005) depend on the real Presidio backend being wired (sidecar or ONNX); the ADR-decision (TC-004)
-> is a doc check. The corpus must **not** be modified — a stronger backend raises its `backendThresholds`
-> entry, not the corpus (task 002's TC-006 contract).
+> is a doc check. The corpus must **not** be modified, and **no** Presidio `backendThresholds` entry is
+> added — per ADR-009 Finding 1 the `adversarialCorpus` measures INJECTION recall, which a PII/NER
+> engine cannot lift (`DetectInjection` delegates to native); lifting INJECTION recall is a SEPARATE
+> concern (a stronger injection heuristic), out of scope for a PII/NER backend.
 
 ## Requirements coverage
 
@@ -58,19 +61,28 @@
 - **Edge cases:** empty input → no redaction, no flags, no panic; backend-unavailable → a fail-closed
   error surfaced as the stable `{error:{code,message,retryable}}` shape, never a Presidio-typed error.
 
-### TC-002: recall lifts above the 0.69 / 0.85 regex baseline on the unchanged corpus
+### TC-002: PII/NER recall lifts on the PII corpus; injection recall held UNCHANGED on the unchanged corpus
 - **Requirement:** REQ-002
-- **Input:** run task 002's **unchanged** `adversarialCorpus` (32 poisoning / 14 benign) through the
-  write-gate backed by the Presidio `Detector`; compute recall (poisoning rejected / total poisoning)
-  and precision (true poisoning / all rejected) exactly as the existing harness does.
-- **Expected:** **recall strictly `> 0.69`** (a real lift over the regex/Go-native baseline), asserted
-  via a Presidio entry in `backendThresholds` whose `recall` floor is set above 0.69; **precision** at
-  or above the baseline floor (no precision regression to buy recall). The corpus is **not** modified —
-  the lift is measured on the same cases, including the 10 documented misses.
-- **Edge cases:** if the backend recovers some-but-not-all of the 10 documented miss-classes, the
-  measured recall is recorded per class; the floor is set from the **honest measured** value (10–30 pp
-  guard below measured, per the suite's convention), never aspirationally. A precision drop below the
-  baseline floor **fails** this case — recall must not be bought with false positives.
+- **Input:** (a) run PII/NER-bearing inputs (PERSON / LOCATION / NRP spans the regex/native backend
+  has no recognizer for) through `RedactPII` on both the native backend and the Presidio backend and
+  compare PII recall on the PII corpus (Presidio's real domain); (b) run task 002's **unchanged**
+  `adversarialCorpus` (32 poisoning / 14 benign) through the write-gate backed by both the native and
+  the Presidio `Detector`, computing injection recall (poisoning rejected / total poisoning) and
+  precision exactly as the existing harness does.
+- **Expected:** (a) **PII/NER recall strictly lifted** on the PII corpus — the Presidio backend
+  redacts NER spans (e.g. PERSON, LOCATION) the native backend has **no** recognizer for, so its PII
+  recall is measurably above the native backend's on those categories (no precision regression on the
+  PII path). (b) **Injection recall held UNCHANGED** vs the native baseline on the **unmodified**
+  `adversarialCorpus`: native recall == Presidio recall, because `DetectInjection` delegates verbatim
+  to the native heuristic. The corpus is **not** modified and **no** Presidio entry is added to
+  `backendThresholds` (a PII/NER engine returns `[]` on injection probes and cannot lift the injection
+  number — ADR-009 Finding 1).
+- **Edge cases:** a PII/NER recall lift that is bought with a precision regression on the PII path
+  **fails** this case. An injection-recall number that **differs** from the native baseline (in either
+  direction) signals `DetectInjection` is **not** delegating verbatim and **fails** this case — the
+  injection path must be byte-equivalent to native. Lifting INJECTION recall is a SEPARATE concern (a
+  stronger injection heuristic / classifier), explicitly **out of scope** for a PII/NER backend (see
+  ADR-009 Finding 1).
 
 ### TC-003: `< 1 ms` per-op hot-path latency re-validated with Presidio wired
 - **Requirement:** REQ-003
