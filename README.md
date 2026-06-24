@@ -54,7 +54,9 @@ IPC: `{"op":"validate_write","entry":"…"}` · `{"op":"validate_read","query":"
 
 ## Status
 
-🚧 **v0.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), in-memory store (MemoryStore stand-in), and post-deletion verification with residue detection + deletion-hash. See the [roadmap](docs/plans/roadmap.md) for deferred work and planned features.
+🚧 **v0 substrate.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), in-memory store (MemoryStore stand-in), and post-deletion verification with residue detection + deletion-hash.
+
+The five historically "v1"-labelled tasks (001–005) shipped and are ✅ verified — but they **harden the v0 substrate, they do not make this a v1**: detection is still regex/Go-native (no Presidio/NER), the store is still an in-memory map, identity is carried-but-not-enforced, and the contract is **not yet tracer-validated**. A true v1 needs a real detection backend, a real MemoryStore, identity enforcement, audit emission, and a contract tracer — see [Toward a true v1](docs/plans/roadmap.md#toward-a-true-v1-substrate-not-just-tasks) in the roadmap.
 
 ## Adapter seam & standards
 

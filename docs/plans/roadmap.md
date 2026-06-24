@@ -26,24 +26,47 @@ contract.
 > **Not yet tracer-validated.** memory-guard was out of the first tracer-bullet's scope (stateless
 > slice, tracer-bullet.md §6); the contract shapes get their own tracer once memory is in play.
 
-## v1 — Detector backend + adversarial gate + real delete-proof + identity + audit
+## v0-hardening increment (within-repo) — ✅ shipped (tasks 001–005)
 
-Each item a self-contained task. The contract (`validate_read`/`validate_write`/`verify_delete`) and
-the `Detector` interface stay the swap points — hardening and richer backends slot in **without
+> **Naming note — read this if you think memory-guard is "at v1."** These five were historically
+> labelled "v1 tasks," but they **harden the v0 substrate; they do not deliver a true v1.** After
+> all five, detection is still regex/Go-native (no Presidio/NER), the store is still an in-memory
+> map stand-in, identity is carried-but-not-enforced, and the contract is **not yet
+> tracer-validated**. What a genuine v1 requires is tracked under
+> [Toward a true v1](#toward-a-true-v1-substrate-not-just-tasks) below.
+
+Each was a self-contained task behind the contract (`validate_read`/`validate_write`/`verify_delete`)
+and the `Detector` interface — the swap points stayed fixed so hardening slotted in **without
 changing the contract or any caller**. The load-bearing invariants (write-gate fail-closed, PII never
-stored/returned raw, delete-verified, detector-seam isolation, fail-closed errors) hold across every
-task; a change that violates one is a blocker, not a trade-off.
+stored/returned raw, delete-verified, detector-seam isolation, fail-closed errors) held across every
+task.
 
 | # | Work | Status |
 |---|------|--------|
-| 1 | **Resolve the `Detector` backend (the memory-guard tracer)** — settle Presidio-as-sidecar vs. Presidio-via-ONNX in-process vs. Go-native NER, the hot-path latency budget, and the deployment shape, behind the existing `Detector` seam; record the decision as an ADR. | 🔜 task 001 |
-| 2 | **Adversarial context-poisoning test-suite** — the MINJA-/GRAGPoison-/context-window-injection suite the write-gate is measured against; replaces the v0 "a few regex patterns" with a measured recall/precision bar. | 🔜 task 002 |
-| 3 | **Post-deletion verification across every index/copy** — extend `verify_delete` from "absent in the in-memory map" to "no semantic residue in any other entry/index" (the documented industry gap); residue-detection method TBD in the tracer. | 🔜 task 003 |
-| 4 | **PII recognizer coverage hardening** — broaden the recognizer set (names, phone, IBAN, more credential/API-key shapes) and reduce false-negatives behind the `Detector` seam; measured against a PII corpus. | 🔜 task 004 |
-| 5 | **Publish / remote follow-up** — create a git remote and push (TODO.md); confirm public/private visibility; SPDX headers stay on new files. | 🔜 task 005 |
+| 1 | **Resolve the `Detector` backend** — settled Presidio-as-sidecar vs. Presidio-via-ONNX in-process vs. Go-native behind the existing `Detector` seam; recorded as [ADR-002](../architecture/decisions/002-detector-backend.md) (Go-native, in-process, zero new deps; ~5.6 µs/op). Presidio is **deferred, not foreclosed**. | ✅ verified (L6) |
+| 2 | **Adversarial context-poisoning test-suite** — MINJA-/GRAGPoison-/context-window-injection suite; measured baseline recall **0.69** / precision **0.85** on the v0 backends, with 10 documented miss-classes. | ✅ verified (L5) |
+| 3 | **Post-deletion residue verification** — extended `verify_delete` from "absent in the in-memory map" to a tiered residue scan over surviving entries + a deletion-hash ([ADR-003](../architecture/decisions/003-residue-verification.md)); residue 85.7% / precision 100% over the one store. | ✅ verified (L6) |
+| 4 | **PII recognizer coverage hardening** — broadened the recognizer set (phone, IBAN, IP, DOB, more credential shapes) behind the `Detector` seam; recall/precision 1.00 over 9 categories on the corpus. | ✅ verified (L5) |
+| 5 | **Publish / remote follow-up** — created the private GitHub remote and pushed; SPDX headers on new files. | ✅ verified (L6) |
 
-These five are the v1 increment **within this repo** — each self-contained behind the contract +
-`Detector` seam. The working v0 source is **not rewritten** — v1 work extends it.
+The working v0 source was **not rewritten** — these extended it behind the contract + `Detector` seam.
+
+## Toward a true v1 (substrate, not just tasks)
+
+The five tasks above hardened the **skeleton**; they did not replace the **stand-ins**. The repo flips
+from "v0 substrate" to a defensible **v1** only when the load-bearing stand-ins become real and the
+contract is tracer-validated. The gating item is the **contract tracer** (T6) — until it runs, the
+"not yet tracer-validated" caveat is correct and the headline stays v0. Ordered by dependency:
+
+| # | Work | Unblocks / depends on | Status |
+|---|------|-----------------------|--------|
+| T1 | **MemoryStore seam + one real adapter** — extract a `MemoryStore` interface and back it with a real store (vector/LangChain/LlamaIndex memory) instead of the in-memory map. The single map is *why* delete-proof and identity can't be real yet. | foundational — unblocks T3, T4 | 🔜 proposed |
+| T2 | **Presidio-backed `Detector`** (sidecar or ONNX, behind the unchanged seam) — un-defer ADR-002's Presidio path; first third-party dep, so a `dep-scan`/`code-scanner` **blocking gate** + a new ADR; must lift recall above the 0.69 regex baseline and re-validate the `< 1 ms` latency budget. | behind the `Detector` seam | 🔜 proposed |
+| T3 | **Residue proof across every index/copy** — extend the residue scan from "survivors in one map" to every backing index of the real store, plus the documented semantic-paraphrase miss-class. | **depends on T1** | 🔜 proposed |
+| T4 | **Identity-scoped read isolation (R1)** — enforce `identity` on `validate_read` so a writer's entries are readable only under a matching identity. | **depends on T1 + external identity** (SPIFFE/A2A from agent-mesh/vault) | ⛔ blocked |
+| T5 | **audit-trail OCSF emission (R2)** — emit detections as OCSF events to `audit-trail` (soft runtime dep). | consume audit-trail's emit contract | 🔜 proposed |
+| T6 | **memory-guard's own tracer-bullet** — end-to-end slice with a real store + a real consumer that **validates the contract shapes**, promoting them from "not yet tracer-validated." May refine `validate_*`/`verify_delete`. **This is the task that earns the v1 label.** | **depends on T1, ideally T2** | 🔜 proposed |
+| T7 | **Fitness-function runner wired as a gate** — promote `docs/spec/fitness-functions.md` from `proposed` to enforced (latency budget, recall/precision floor, seam-isolation check) behind a `make check`/`make fitness` target. | — | 🔜 proposed |
 
 ## Remaining work — blocked / decisions needed
 
