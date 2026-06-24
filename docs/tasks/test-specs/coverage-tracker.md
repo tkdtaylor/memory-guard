@@ -20,16 +20,18 @@
 
 ## Backlog — true-v1 increment (roadmap "Toward a true v1")
 
-Scaffolded 2026-06-24; specs written, **not yet started** (status ❌, except 009 which is ⚠️ blocked).
-These flip to 🟡/✅ only after a task branch implements + verifies them. The gating task for the v1
-label is **011** (contract tracer) — it depends on **006**.
+Scaffolded 2026-06-24; specs written, **not yet started** (status ❌). These flip to 🟡/✅ only after a
+task branch implements + verifies them. The gating task for the v1 label is **011** (contract tracer) —
+it depends on **006**. Note: **009** was re-scoped 2026-06-24 from ⚠️-blocked to ❌-startable — its
+verifiable-identity issuer already exists in agent-mesh; only the identity-propagation contract decision
+remains (vault dropped as a dependency).
 
 | Task ID | Feature (roadmap) | Spec file | Tests written | Status | Depends on |
 |---------|-------------------|-----------|---------------|--------|------------|
 | 006 | MemoryStore seam + one real adapter (T1) | `006-memorystore-seam-test-spec.md` | TC-001…TC-006 | ❌ | — (foundational; unblocks 008, 011) |
 | 007 | Presidio-backed `Detector` (T2) | `007-presidio-detector-backend-test-spec.md` | TC-001…TC-007 | ❌ | ask-first ADR + dep-scan gate |
 | 008 | Residue proof across every index/copy (T3) | `008-residue-across-indexes-test-spec.md` | TC-001…TC-008 | ❌ | **006** |
-| 009 | Identity-scoped read isolation (T4 / R1) | `009-identity-scoped-read-isolation-test-spec.md` | TC-001…TC-007 | ⚠️ | external identity (agent-mesh/vault) + 006 |
+| 009 | Identity-scoped read isolation (T4 / R1) | `009-identity-scoped-read-isolation-test-spec.md` | TC-001…TC-007 | ❌ | 006 + identity-propagation contract (agent-mesh already ships the SVID; vault dropped) |
 | 010 | audit-trail OCSF emission (T5 / R2) | `010-audit-trail-emission-test-spec.md` | TC-001…TC-007 | ❌ | audit-trail emit contract; seq. after 007 |
 | 011 | Contract tracer-bullet — **earns the v1 label** (T6) | `011-contract-tracer-bullet-test-spec.md` | TC-001…TC-006 | ❌ | **006** (ideally 007) |
 | 012 | Fitness-function runner wired as a gate (T7) | `012-fitness-function-runner-test-spec.md` | TC-001…TC-008 | ❌ | — |

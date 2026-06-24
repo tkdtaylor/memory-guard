@@ -63,19 +63,47 @@ contract is tracer-validated. The gating item is the **contract tracer** (T6) �
 | T1 | **MemoryStore seam + one real adapter** — extract a `MemoryStore` interface and back it with a real store (vector/LangChain/LlamaIndex memory) instead of the in-memory map. The single map is *why* delete-proof and identity can't be real yet. | foundational — unblocks T3, T4 | 🔜 proposed |
 | T2 | **Presidio-backed `Detector`** (sidecar or ONNX, behind the unchanged seam) — un-defer ADR-002's Presidio path; first third-party dep, so a `dep-scan`/`code-scanner` **blocking gate** + a new ADR; must lift recall above the 0.69 regex baseline and re-validate the `< 1 ms` latency budget. | behind the `Detector` seam | 🔜 proposed |
 | T3 | **Residue proof across every index/copy** — extend the residue scan from "survivors in one map" to every backing index of the real store, plus the documented semantic-paraphrase miss-class. | **depends on T1** | 🔜 proposed |
-| T4 | **Identity-scoped read isolation (R1)** — enforce `identity` on `validate_read` so a writer's entries are readable only under a matching identity. | **depends on T1 + external identity** (SPIFFE/A2A from agent-mesh/vault) | ⛔ blocked |
+| T4 | **Identity-scoped read isolation (R1)** — enforce `identity` on `validate_read` so a writer's entries are readable only under a matching identity. | **depends on T1 + the identity-propagation contract** (agent-mesh already ships the verifiable SPIFFE principal; vault is not the source) | 🔜 startable — one interface decision (see R1) |
 | T5 | **audit-trail OCSF emission (R2)** — emit detections as OCSF events to `audit-trail` (soft runtime dep). | consume audit-trail's emit contract | 🔜 proposed |
 | T6 | **memory-guard's own tracer-bullet** — end-to-end slice with a real store + a real consumer that **validates the contract shapes**, promoting them from "not yet tracer-validated." May refine `validate_*`/`verify_delete`. **This is the task that earns the v1 label.** | **depends on T1, ideally T2** | 🔜 proposed |
 | T7 | **Fitness-function runner wired as a gate** — promote `docs/spec/fitness-functions.md` from `proposed` to enforced (latency budget, recall/precision floor, seam-isolation check) behind a `make check`/`make fitness` target. | — | 🔜 proposed |
 
 ## Remaining work — blocked / decisions needed
 
-### R1 — Identity-scoped read isolation — blocked: external identity
-Today `validate_read` matches by substring across the whole store and `identity` is carried but not
-enforced. Tenant isolation (a writer's entries readable only under a matching identity) needs the
-workload-identity model (SPIFFE SVID issuance / A2A signed identity) from **agent-mesh / vault** before
-a task can assert a real identity rather than a free-form map. Until then, the un-scoped substrate read
-is the v0/v1 behavior.
+### R1 — Identity-scoped read isolation — the issuer exists; the propagation contract does not
+**Re-scoped 2026-06-24 after auditing the siblings.** Today `validate_read` matches by substring across
+the whole store and `identity` is carried but not enforced. The earlier blocker ("needs a
+workload-identity model from agent-mesh / vault") is **partly stale**:
+
+- **agent-mesh already ships the verifiable principal** — X.509-SVID issuance (SPIFFE ID as a URI SAN,
+  Ed25519-bound), a signed-envelope wire carrier (`Envelope.From`), and a fail-closed verification path
+  (chain → trust-bundle, signature, replay), tracer-validated. Only the *live* SPIRE/Vault issuer is
+  deferred — a mock issuer stands in behind agent-mesh's `SvidProvider` seam, which is exactly what our
+  own tracer would use.
+- **vault is not an identity source** — it is a secrets broker, and its own SPIFFE binding is itself
+  blocked on agent-mesh. It is a *co-consumer* of the same principal, not a supplier. **Dropped as a
+  dependency for this task.**
+
+So the real remaining gap is **the identity-propagation contract**: the shape of the verified SPIFFE
+claim memory-guard receives on each `validate_*`, and who verifies it. That is one interface decision,
+not an upstream build.
+
+**Recommended resolution (ratify in the task-009 REQ-007 ADR): memory-guard receives a *pre-verified*
+SPIFFE principal — the normalized SPIFFE ID plus a `trust_tier` (e.g. `attested`) — and does NOT
+re-verify the SVID itself.** Verification (SVID chain, Ed25519 signature, replay) stays agent-mesh's
+job; the hosting agent's mesh receiver hands the trusted principal across memory-guard's `0600`
+UID-gated socket. memory-guard binds/matches on the SPIFFE ID and enforces isolation only when
+`trust_tier` is attested; an unverified/absent principal hits the documented no-identity fallback (009
+REQ-005). Rationale: **(1)** keeps the `< 1 ms` hot-path budget — per-call X.509 chain verification
+would blow it; **(2)** honors the seam discipline — no SPIFFE/X.509 specifics leak into the guard, the
+same reason the `Detector` seam exists; **(3)** the trust boundary is already the local UID-gated
+socket — a caller that could forge the principal could equally lie about the content/query, so in-guard
+re-verification buys little there. In-process SVID verification stays available behind the same
+`Principal` seam as a **deferred zero-trust config**, not the v1 default.
+
+With this, **009 is startable now** against agent-mesh's mock SVID; live SPIRE swaps in later behind
+agent-mesh's `SvidProvider` seam with no memory-guard change. Until 009 lands, the un-scoped substrate
+read remains the v0/v1 behavior.
 
 ### R2 — audit-trail emission — soft-dependency, plannable
 Detections are returned as `flags` today; emitting them as **OCSF events to `audit-trail`** is a

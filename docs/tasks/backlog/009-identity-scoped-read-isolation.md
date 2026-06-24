@@ -2,20 +2,32 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-24
-**Status:** backlog (blocked)
+**Status:** backlog (startable — pending the identity-propagation contract decision; see below)
 
-> ## ⛔ BLOCKED — external dependency not yet available
+> ## 🔜 STARTABLE — re-scoped 2026-06-24 (was ⛔ fully blocked)
 >
-> **This task cannot start.** It is blocked on an **external workload-identity model** — SPIFFE SVID
-> issuance / A2A signed identity — from the sibling **agent-mesh / vault** projects. Until that upstream
-> lands, `identity` here is a **free-form `map[string]any`** carried through the contract but with no
-> verifiable subject to bind to. Enforcing read isolation against a forgeable free-form string would be
-> security theatre, not isolation. The block stands until a real, verifiable identity exists to assert.
+> **The heavy external blocker has cleared.** An audit of the siblings found that **agent-mesh already
+> ships the verifiable workload identity** this task asserts against — X.509-SVID issuance (SPIFFE ID as
+> a URI SAN, Ed25519-bound), a signed-envelope carrier (`Envelope.From`), and a fail-closed verification
+> path (chain → trust-bundle, signature, replay), tracer-validated. Only the *live* SPIRE/Vault issuer is
+> deferred; a mock issuer stands in behind agent-mesh's `SvidProvider` seam — which is exactly what this
+> task's own tracer would use. **vault is NOT an identity source** — it is a secrets broker whose own
+> SPIFFE binding is itself blocked on agent-mesh; it is a co-consumer of the same principal and is
+> **removed here as a dependency**.
 >
-> See roadmap **T4** (⛔ blocked) and **R1 — Identity-scoped read isolation — blocked: external
-> identity** in [`docs/plans/roadmap.md`](../../plans/roadmap.md). **Do not begin implementation until
-> the readiness gate's external-dependency items below are checked.** The spec + acceptance criteria
-> are authored ahead so the work is ready the moment the block clears.
+> **What remains is one interface decision, not an upstream build: the identity-propagation contract** —
+> the shape of the verified SPIFFE claim memory-guard receives on each `validate_*`, and who verifies it.
+> **Recommended (ratify in the REQ-007 ADR): receive a *pre-verified* SPIFFE principal (the normalized
+> SPIFFE ID + a `trust_tier`); do NOT re-verify the SVID in-guard.** Verification stays agent-mesh's job;
+> enforce isolation only when the principal is `attested`; an unverified/absent principal → the REQ-005
+> fallback. Why: the `< 1 ms` hot-path budget rules out per-call X.509 verification, and the seam
+> discipline keeps SPIFFE/X.509 specifics out of the guard (the same reason the `Detector` seam exists);
+> the `0600` UID-gated socket is already the trust boundary. In-guard SVID verification stays available
+> behind a `Principal` seam as a **deferred zero-trust config**.
+>
+> See roadmap **T4** and **R1** in [`docs/plans/roadmap.md`](../../plans/roadmap.md). 009 is **startable
+> now** against agent-mesh's mock SVID; live SPIRE swaps in later with no memory-guard change. The spec +
+> acceptance criteria below were authored ahead and need only the propagation-contract decision pinned.
 
 ## Goal
 
@@ -44,10 +56,16 @@ compared). The target behavior:
   `ValidateRead` loops the whole `store` map with `strings.Contains(e.content, query)` and never reads
   `identity`; the `entry` struct already carries `identity map[string]any` set at write time but it is
   inert.
-- **External blocker (load-bearing):** a **verifiable** workload identity — SPIFFE SVID / A2A signed
-  identity — from **agent-mesh / vault** must exist first. The task asserts isolation against a
-  *verifiable* subject (an SVID / signed principal), not the current forgeable free-form map. Without
-  it, "isolation" is unenforceable. This is the same blocker R1 documents.
+- **External dependency (re-scoped 2026-06-24):** the **verifiable** subject this task asserts against —
+  a SPIFFE SVID principal — **already exists in agent-mesh** (X.509-SVID issuance + a fail-closed
+  verification path, tracer-validated; mock issuer now, live SPIRE deferred behind agent-mesh's
+  `SvidProvider` seam). **vault is not the source** (a secrets broker, itself blocked on agent-mesh;
+  removed as a dependency). The remaining gap is the **identity-propagation contract**: the
+  verified-SPIFFE-claim shape memory-guard receives on each `validate_*`, and who verifies it.
+  **Recommended (ratify in the REQ-007 ADR): receive a pre-verified SPIFFE principal (normalized ID +
+  `trust_tier`); do NOT re-verify the SVID in-guard** — verification stays agent-mesh's job, which keeps
+  the `< 1 ms` budget and the seam discipline (no X.509 specifics in the guard). Enforce isolation only
+  when `attested`; unverified/absent → the REQ-005 fallback.
 - **Soft-depends on task 006** (the real `MemoryStore` seam + adapter, roadmap T1): the single in-memory
   map is *why* per-identity indexing can't be real yet. A real store gives a natural per-identity index
   / partition for the scoped lookup. 009 can be implemented as a linear identity filter over the v0 map
@@ -65,22 +83,24 @@ Requirements describe the **target** behavior once unblocked. Per-REQ blocker ca
 
 | Req ID | Description | Priority | Blocker |
 |--------|-------------|----------|---------|
-| REQ-001 | `validate_write` **binds** the writer's verifiable identity to the stored entry, recording a normalized identity key the read path can match against (not the inert free-form map). | must have | ⛔ needs verifiable external identity (SPIFFE/A2A) to be the bound subject |
-| REQ-002 | `validate_read` returns an entry **only** when the reader's identity **matches** the entry's bound identity; non-matching entries are excluded from the result set entirely. | must have | ⛔ needs verifiable external identity to match against |
-| REQ-003 | **No cross-identity leakage:** writer A's entry is never returned to reader B even when the query substring matches the content. (The load-bearing isolation assertion.) | must have | ⛔ needs verifiable external identity |
+| REQ-001 | `validate_write` **binds** the writer's verifiable identity to the stored entry, recording a normalized identity key the read path can match against (not the inert free-form map). | must have | needs the propagation contract (bound subject = the pre-verified SPIFFE ID from agent-mesh) |
+| REQ-002 | `validate_read` returns an entry **only** when the reader's identity **matches** the entry's bound identity; non-matching entries are excluded from the result set entirely. | must have | needs the propagation contract (match on the pre-verified SPIFFE ID) |
+| REQ-003 | **No cross-identity leakage:** writer A's entry is never returned to reader B even when the query substring matches the content. (The load-bearing isolation assertion.) | must have | — (testable now against a mock SVID principal) |
 | REQ-004 | The **un-scoped whole-store substring read** in `ValidateRead` is replaced by an identity-scoped lookup; matching is exact on the normalized identity key, not substring/fuzzy. | must have | — (mechanics local; correctness needs REQ-001/002) |
 | REQ-005 | **No-identity / unauthenticated read** falls back to the **documented** behavior (an explicit, spec'd policy — e.g. deny, or return only entries written with no bound identity); it is **not** an implicit return-everything. The chosen policy is recorded in the spec + an ADR. | must have | — (policy decision; document it) |
 | REQ-006 | PII redaction on read is **unchanged** (defense in depth still runs on whatever the scoped set returns); the write-gate stays fail-closed; **no detector specifics** leak into the identity-matching path. | must have | — |
-| REQ-007 | The identity model is **documented in an ADR** (how a verifiable identity from agent-mesh/vault is consumed, normalized, bound, and matched; what "match" means for SVID/A2A principals). | must have | ⛔ needs the upstream identity model to exist to document |
+| REQ-007 | The identity model is **documented in an ADR** that ratifies the propagation/verification decision (recommended: a pre-verified SPIFFE principal from agent-mesh, not re-verified in-guard) — how the principal is consumed, normalized, bound, and matched; what "match" means for a SPIFFE ID; and the no-identity fallback. | must have | — (decision is recommended above; ADR ratifies it) |
 
 ## Readiness gate
 
 - [x] Test spec `009-identity-scoped-read-isolation-test-spec.md` exists in `docs/tasks/test-specs/`
-- [ ] **EXTERNAL — agent-mesh / vault workload-identity model is available** (SPIFFE SVID issuance or
-      A2A signed identity) and consumable by memory-guard — **the load-bearing blocker; nothing starts
-      until this is checked**
-- [ ] **EXTERNAL — the verifiable-identity shape is pinned** (what memory-guard receives on each
-      `validate_*` call: SVID / signed principal — its representation and verification path)
+- [x] **Verifiable identity issuer exists** — agent-mesh ships X.509-SVID issuance + a fail-closed
+      verification path (tracer-validated; mock issuer now, live SPIRE deferred behind its
+      `SvidProvider` seam). *vault dropped — not an identity source.*
+- [ ] **Identity-propagation contract pinned** — the verified-SPIFFE-claim shape memory-guard receives
+      on each `validate_*`, and who verifies it. **Recommended: pre-verified SPIFFE principal (ID +
+      `trust_tier`), verified upstream by agent-mesh, not re-verified in-guard** — ratify in the REQ-007
+      ADR. *(This is the one decision that gates the start.)*
 - [ ] Task 006 (real `MemoryStore` seam + adapter, roadmap T1) landed, or a decision to ship 009 as a
       linear identity filter over the v0 map first — **recommended dependency; per-identity indexing is
       the durable form**
