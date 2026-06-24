@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-06-24 (task 006 — MemoryStore seam + stdlib second adapter, ADR-005)
+**Last updated:** 2026-06-24 (task 008 — residue proof across every backing index/copy via `AllByIndex()`; stdlib number-word paraphrase, ADR-006)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -35,7 +35,7 @@ C4Context
 
     Rel(agent, memguard, "validate_write / validate_read / verify_delete", "JSON / Unix socket")
     Rel(operator, memguard, "serve / write / read", "CLI")
-    Rel(memguard, store, "Put / Scan / Get / Delete / All", "behind the MemoryStore seam (ADR-005)")
+    Rel(memguard, store, "Put / Scan / Get / Delete / All / AllByIndex", "behind the MemoryStore seam (ADR-005/ADR-006)")
     Rel(memguard, audit, "detection events (flags → OCSF)", "v1, not wired in v0")
 ```
 
@@ -59,8 +59,8 @@ C4Component
     Container_Boundary(boundary, "memory-guard binary") {
         Component(main, "CLI", "main.go", "serve / write / read subcommands; parse --socket; print WriteResult/ReadResult JSON for the one-shot demos; exit 2 on a missing/unknown subcommand")
         Component(ipc, "IPC server", "ipc.go", "serve: remove stale socket, bind 0600 Unix socket, frame newline-delimited JSON, dispatch validate_write/validate_read/verify_delete/ping over a shared *MemoryGuard; structured error shape {error:{code,message,retryable}}")
-        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store.Put), ValidateRead (store.Scan → RedactPII), VerifyDelete (store.Delete → re-check absence via store.Get → scan store.All() survivors for residue, ADR-003: tiered normalized substring/phrase/token-overlap, stdlib-only, returns confirmed/residue_detected/residue_summary?/deletion_hash)); talks to the store ONLY through the MemoryStore seam behind a sync.Mutex; mints opaque stored_id from crypto/rand")
-        Component(store, "MemoryStore seam", "store.go", "MemoryStore interface (Put / Get / Delete / Scan / All) + two stdlib backings: InMemoryStore (the default single map[string]entry) and TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both). The boundary that isolates the storage backend; ADR-005")
+        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store.Put), ValidateRead (store.Scan → RedactPII), VerifyDelete (store.Delete → re-check absence via store.Get → scan store.AllByIndex() survivors across EVERY backing index/copy for residue, ADR-003/ADR-006: tiered normalized substring/phrase/token-overlap + number-word canonicalization, stdlib-only, returns confirmed/residue_detected/residue_summary? naming the index/deletion_hash)); talks to the store ONLY through the MemoryStore seam behind a sync.Mutex; mints opaque stored_id from crypto/rand")
+        Component(store, "MemoryStore seam", "store.go", "MemoryStore interface (Put / Get / Delete / Scan / All / AllByIndex) + two stdlib backings: InMemoryStore (the default single map[string]entry; AllByIndex exposes one \"primary\" index) and TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both; AllByIndex names each). The boundary that isolates the storage backend; ADR-005/ADR-006")
         Component(detector, "Detector seam", "detector.go", "Detector interface (RedactPII / DetectInjection) + the v0 RegexDetector (Presidio stand-in): EMAIL/US_SSN/CREDIT_CARD/API_KEY recognizers; ignore/disregard-instructions, system-prompt, <system>/<instructions> injection patterns. The boundary that isolates the detection backend")
     }
 
@@ -91,10 +91,11 @@ C4Component
   substring hits and returns them **PII-redacted** (defense in depth); v0 always `allow:true`
   (`guard.go::ValidateRead`).
 - `verify_delete(id) -> { confirmed, residue_detected, residue_summary?, deletion_hash }` — deletes,
-  **re-checks the store** to prove absence, then **scans the surviving entries for residue** of the
-  deleted content (`guard.go::VerifyDelete` + `residue.go`, ADR-001 §5 / ADR-003). The residue scan is
-  a tiered normalized substring / phrase / token-overlap match — stdlib-only guard-side logic, not a
-  `Detector` concern.
+  **re-checks the store** to prove absence, then **scans the surviving entries across every backing
+  index/copy** (`store.AllByIndex()`) for residue of the deleted content, naming the index it survives
+  in (`guard.go::VerifyDelete` + `residue.go`, ADR-001 §5 / ADR-003 / ADR-006). The residue scan is a
+  tiered normalized substring / phrase / token-overlap match with number-word canonicalization —
+  stdlib-only guard-side logic, not a `Detector` concern.
 - Every malformed / unknown request is **fail-closed** — a structured error, nothing stored
   (`ipc.go::errShape`, ADR-001 §7).
 

@@ -22,11 +22,18 @@ import (
 // Method (ADR-003 — normalized substring/token-overlap, zero new dependency), tiered:
 //  1. exact-substring of distinctive fragments (verbatim copies — the credential/secret case);
 //  2. normalized match — lowercase, fold whitespace/punctuation, canonicalize numbers/currency
-//     ($5000 ⇆ $5k, 5,000 ⇆ 5000) (catches the named $5000 → $5k fragment + near-verbatim);
+//     ($5000 ⇆ $5k, 5,000 ⇆ 5000) AND spelled-out number-words (five thousand ⇆ 5000) (catches the
+//     named $5000 → $5k fragment, near-verbatim, and the number-word paraphrase class — ADR-006);
 //  3. token-overlap threshold (catches reordered / partial fragments).
 //
-// Full semantic paraphrase is the known miss class of a substring/token method (ADR-003) — it
-// is recorded honestly per residue class in the corpus harness, not hidden.
+// Across EVERY backing index/copy (task 008 / ADR-006): the scan runs over the store's
+// AllByIndex() — each named backing index — so a residue surviving in a SECONDARY index (one the
+// primary-keyed All() would miss) is caught, and the summary NAMES the index it survives in.
+//
+// Full free-form semantic paraphrase (synonym substitution with no shared distinctive token —
+// "potted plant" → "planter near the rack closet") remains the residual known-miss class of a
+// stdlib substring/token/number-word method (ADR-006) — recorded honestly per residue class in the
+// corpus harness, not hidden. The number-word class IS now caught.
 
 // tokenOverlapThreshold is the fraction of the deleted content's distinctive tokens that must
 // also appear in a surviving entry for tier-3 to flag residue. Tuned to catch reordered/partial
@@ -50,14 +57,25 @@ const phraseMinTokens = 3
 // from being false positives while verbatim secrets/URLs still flag.
 const strongTokenMinLen = 8
 
-// residueScan scans the surviving entries for residue of the just-deleted content. It returns
-// whether residue was detected and a human-readable summary of the first (highest-confidence)
-// match. survivors is the remaining store AFTER the target entry has been removed — supplied as
-// the store's All() across EVERY backing index/copy — so an entry whose own content is the
-// residue source cannot flag itself once deleted (no self-residue FP). It receives []entry rather
-// than the raw map so it stays decoupled from the MemoryStore backing: a single- or multi-index
-// store hands the same survivor slice across the seam.
+// residueScan scans a single index's surviving entries for residue of the just-deleted content
+// (the task-003 single-map scan). It is preserved as a thin wrapper over residueScanIndexes so the
+// task-003 residue tests, which pass one survivor slice, behave UNCHANGED (REQ-005): a single index
+// keyed "primary". survivors is the remaining store AFTER the target entry has been removed, so an
+// entry whose own content is the residue source cannot flag itself once deleted (no self-residue
+// FP). It receives []entry rather than the raw map so it stays decoupled from the MemoryStore
+// backing.
 func residueScan(deletedContent string, survivors []entry) (detected bool, summary string) {
+	return residueScanIndexes(deletedContent, map[string][]entry{primaryIndexName: survivors})
+}
+
+// residueScanIndexes scans EVERY backing index/copy for residue of the just-deleted content (task
+// 008 / ADR-006). byIndex maps an index name (a plain string label from the MemoryStore seam's
+// AllByIndex()) to that index's survivors. It returns whether residue was detected in ANY index and
+// a human-readable summary of the first (highest-confidence, deterministic) match — the summary
+// NAMES the index the residue survives in. Scanning every index means a residue surviving only in a
+// SECONDARY copy (which a primary-keyed All() scan would miss) is caught. For a single-index store
+// (one "primary" entry in byIndex) this reduces exactly to the task-003 single-map scan.
+func residueScanIndexes(deletedContent string, byIndex map[string][]entry) (detected bool, summary string) {
 	deletedContent = strings.TrimSpace(deletedContent)
 	if deletedContent == "" {
 		return false, ""
@@ -66,61 +84,85 @@ func residueScan(deletedContent string, survivors []entry) (detected bool, summa
 	normDeleted := normalizeForResidue(deletedContent)
 	delTokens := distinctiveTokens(deletedContent)
 
-	// Deterministic scan order so the reported summary is stable across runs and identical across
-	// store backings (a map-backed store and a multi-index store iterate in different native orders,
-	// but residue parity must not depend on that). Sort survivors by content.
-	contents := make([]string, 0, len(survivors))
-	for _, e := range survivors {
-		contents = append(contents, e.content)
+	// Deterministic index order: "primary" first (so a residue present in both the primary and a
+	// secondary index reports against "primary" for parity with the single-index scan), then the rest
+	// alphabetically. This keeps the reported summary stable across runs and store backings.
+	indexNames := make([]string, 0, len(byIndex))
+	for name := range byIndex {
+		indexNames = append(indexNames, name)
 	}
-	sort.Strings(contents)
-
-	for _, survivor := range contents {
-		// label the survivor by a short content snippet (the store no longer exposes ids here).
-		survivorLabel := survivorRef(survivor)
-
-		// Tier 1: exact substring of the distinctive fragment.
-		if frag := exactFragmentMatch(deletedContent, survivor); frag != "" {
-			return true, residueSummary("verbatim", survivorLabel, frag)
+	sort.Slice(indexNames, func(i, j int) bool {
+		if indexNames[i] == primaryIndexName {
+			return true
 		}
-
-		// Tier 2: normalized (number/currency-canonicalized) substring.
-		if frag := normalizedFragmentMatch(normDeleted, survivor); frag != "" {
-			return true, residueSummary("normalized", survivorLabel, frag)
+		if indexNames[j] == primaryIndexName {
+			return false
 		}
+		return indexNames[i] < indexNames[j]
+	})
 
-		// Tier 2b: contiguous distinctive phrase — a contiguous span of the deleted content (kept
-		// intact, stopwords included for contiguity) that carries >=phraseMinTokens distinctive
-		// tokens and appears verbatim (normalized) in the survivor. Catches a multi-word secret
-		// phrase ("merger with Acme Corp") whose individual tokens are too short to be strong on
-		// their own, while staying precise (a 3-distinctive-token contiguous phrase is rarely
-		// coincidental).
-		if frag := phraseMatch(normDeleted, survivor); frag != "" {
-			return true, residueSummary("phrase", survivorLabel, frag)
+	for _, indexName := range indexNames {
+		// Deterministic scan order within an index so the reported summary is stable across runs and
+		// identical across store backings (different native map iteration orders must not change the
+		// result). Sort survivors by content.
+		contents := make([]string, 0, len(byIndex[indexName]))
+		for _, e := range byIndex[indexName] {
+			contents = append(contents, e.content)
 		}
+		sort.Strings(contents)
 
-		// Tier 3: distinctive-token overlap above threshold.
-		if ratio, ok := tokenOverlapMatch(delTokens, survivor); ok {
-			return true, residueSummary(
-				fmt.Sprintf("token-overlap %.0f%%", ratio*100), survivorLabel, survivor)
+		for _, survivor := range contents {
+			class, frag := matchSurvivor(deletedContent, normDeleted, delTokens, survivor)
+			if class != "" {
+				return true, residueSummaryInIndex(class, indexName, survivorRef(survivor), frag)
+			}
 		}
 	}
 	return false, ""
 }
 
-// residueSummary renders the operator-visible summary string. It quotes the matched fragment so
-// a human can see WHAT survived and WHERE — without restating the full (already-deleted) content.
-// survivorRef is a short, stable reference to the surviving entry (a content snippet), since the
-// residue scan now operates over the store's All() survivors across every backing index rather
-// than over raw map ids.
-func residueSummary(class, survivorRef, fragment string) string {
+// matchSurvivor runs the tiered residue match of the deleted content against ONE surviving entry,
+// returning the match class and the matched fragment (or "" class for no match). Factored out of the
+// scan loop so it runs identically per survivor in every backing index.
+func matchSurvivor(deleted, normDeleted string, delTokens []string, survivor string) (class, fragment string) {
+	// Tier 1: exact substring of the distinctive fragment.
+	if frag := exactFragmentMatch(deleted, survivor); frag != "" {
+		return "verbatim", frag
+	}
+
+	// Tier 2: normalized (number/currency/number-word-canonicalized) substring.
+	if frag := normalizedFragmentMatch(normDeleted, survivor); frag != "" {
+		return "normalized", frag
+	}
+
+	// Tier 2b: contiguous distinctive phrase — a contiguous span of the deleted content (kept intact,
+	// stopwords included for contiguity) that carries >=phraseMinTokens distinctive tokens and appears
+	// verbatim (normalized) in the survivor. Catches a multi-word secret phrase ("merger with Acme
+	// Corp") whose individual tokens are too short to be strong on their own, while staying precise.
+	if frag := phraseMatch(normDeleted, survivor); frag != "" {
+		return "phrase", frag
+	}
+
+	// Tier 3: distinctive-token overlap above threshold.
+	if ratio, ok := tokenOverlapMatch(delTokens, survivor); ok {
+		return fmt.Sprintf("token-overlap %.0f%%", ratio*100), survivor
+	}
+	return "", ""
+}
+
+// residueSummaryInIndex renders the operator-visible summary string. It quotes the matched fragment
+// so a human can see WHAT survived and WHERE — the surviving entry (a short content snippet, since
+// the scan operates over the store's AllByIndex() survivors, which carry no map id) AND the named
+// backing index/copy the residue survives in (task 008 / ADR-006). The full (already-deleted)
+// content is not restated.
+func residueSummaryInIndex(class, indexName, survivorRef, fragment string) string {
 	frag := fragment
 	const maxFrag = 80
 	if len(frag) > maxFrag {
 		frag = frag[:maxFrag] + "…"
 	}
-	return fmt.Sprintf("%s residue of deleted content survives in entry %s: %q",
-		class, survivorRef, frag)
+	return fmt.Sprintf("%s residue of deleted content survives in index %q, entry %s: %q",
+		class, indexName, survivorRef, frag)
 }
 
 // survivorRef renders a short, stable label for a surviving entry from its content (a quoted
@@ -269,11 +311,16 @@ var (
 )
 
 // normalizeForResidue lowercases, folds whitespace/punctuation, and canonicalizes numbers and
-// currency so $5000 ⇆ $5k and 5,000 ⇆ 5000 compare equal. The canonical form of a magnitude is
-// its plain integer digits (5000), with a leading $ preserved when present so currency context
-// is not lost. Deterministic and stdlib-only (ADR-003).
+// currency so $5000 ⇆ $5k, 5,000 ⇆ 5000, and the spelled-out "five thousand" ⇆ 5000 compare equal.
+// The canonical form of a magnitude is its plain integer digits (5000), with a leading $ preserved
+// when present so currency context is not lost. Deterministic and stdlib-only (ADR-003 / ADR-006).
 func normalizeForResidue(s string) string {
 	s = strings.ToLower(s)
+
+	// Canonicalize spelled-out number-words to digits BEFORE the digit-based passes, so "five
+	// thousand" -> "5000" then flows through the same magnitude/currency canonicalization (ADR-006,
+	// the number-word paraphrase class). Stdlib-only; no dependency.
+	s = canonicalizeNumberWords(s)
 
 	// Strip thousands separators: 5,000 -> 5000.
 	s = numWithCommas.ReplaceAllStringFunc(s, func(m string) string {
@@ -303,6 +350,77 @@ func normalizeForResidue(s string) string {
 	s = punctFold.ReplaceAllString(s, " ")
 	s = wsFold.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
+}
+
+// --- number-word canonicalization (ADR-006, the number-word paraphrase class) ----------------
+
+// numberWordUnits maps spelled-out cardinal number-words (units and tens) to their integer value.
+var numberWordUnits = map[string]int64{
+	"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+	"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+	"eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+	"sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+	"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+	"seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+// numberWordScales maps spelled-out magnitude words to their multiplier.
+var numberWordScales = map[string]int64{
+	"hundred": 100, "thousand": 1000, "million": 1000000, "billion": 1000000000,
+}
+
+// canonicalizeNumberWords rewrites runs of spelled-out cardinal number-words ("five thousand",
+// "twenty five thousand", "three hundred forty two") to their plain integer digits ("5000", "25000",
+// "342"), so a deleted "$5000" and a paraphrased "five thousand dollars" share the strong token
+// "5000" after normalization. It is intentionally conservative — only contiguous runs of recognized
+// number-words (with optional "and") are folded; any other word ends the run and is passed through
+// unchanged. This makes it precision-safe: text with no spelled-out numbers is returned verbatim, so
+// it adds no false positives on the clean controls. Deterministic, stdlib-only (no dependency).
+func canonicalizeNumberWords(s string) string {
+	tokens := strings.Fields(s)
+	out := make([]string, 0, len(tokens))
+	i := 0
+	for i < len(tokens) {
+		w := strings.Trim(tokens[i], ".,$%")
+		_, isUnit := numberWordUnits[w]
+		_, isScale := numberWordScales[w]
+		if !isUnit && !isScale {
+			out = append(out, tokens[i])
+			i++
+			continue
+		}
+		// Consume the contiguous run of number-words (units, scales, and connective "and").
+		var current, total int64
+		consumed, seen := 0, 0
+		for i+consumed < len(tokens) {
+			tw := strings.Trim(tokens[i+consumed], ".,$%")
+			if v, ok := numberWordUnits[tw]; ok {
+				current += v
+				consumed++
+				seen++
+			} else if sc, ok := numberWordScales[tw]; ok {
+				if current == 0 {
+					current = 1
+				}
+				if sc == 100 {
+					current *= 100
+				} else {
+					total += current * sc
+					current = 0
+				}
+				consumed++
+				seen++
+			} else if tw == "and" && seen > 0 {
+				consumed++
+			} else {
+				break
+			}
+		}
+		total += current
+		out = append(out, strconv.FormatInt(total, 10))
+		i += consumed
+	}
+	return strings.Join(out, " ")
 }
 
 // distinctiveTokens splits text into lowercased word tokens, dropping very common stop-words and

@@ -41,7 +41,25 @@ type MemoryStore interface {
 	// All returns every surviving entry, in any order, as a non-nil (possibly
 	// empty) slice so the residue scan iterates cleanly over an empty store.
 	All() []entry
+	// AllByIndex returns the surviving entries grouped by the name of the backing
+	// index/copy they live in: a map from an index name (a plain string label the
+	// store chooses — backend-agnostic, no backend type) to that index's entries.
+	// This is the seam the residue scan (task 008 / ADR-006) uses to prove "no
+	// residue survives in ANY backing index/copy", and to NAME which index a residue
+	// survives in. A single-index store returns exactly one entry in this map (keyed
+	// "primary"), so the multi-index scan reduces exactly to the task-003 single-map
+	// scan (REQ-005). Every []entry value is non-nil (possibly empty). The union of
+	// the values equals All() for stores whose secondary indexes hold no copy beyond
+	// the primary; a store whose secondary index can retain a copy the primary does
+	// not (the multi-index residue case) surfaces that copy here, where All() — keyed
+	// off the primary — would miss it.
+	AllByIndex() map[string][]entry
 }
+
+// primaryIndexName is the canonical label for a store's authoritative id->entry
+// index. A single-index store exposes only this index through AllByIndex, so the
+// residue scan over it reduces exactly to the task-003 single-map scan.
+const primaryIndexName = "primary"
 
 // --- InMemoryStore: the default adapter (the extracted v0 map) --------------------
 
@@ -80,6 +98,13 @@ func (s InMemoryStore) All() []entry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// AllByIndex exposes the single in-memory map as one named index ("primary"). With
+// exactly one index, the multi-index residue scan reduces to the task-003 single-map
+// scan (REQ-005 backward-compat).
+func (s InMemoryStore) AllByIndex() map[string][]entry {
+	return map[string][]entry{primaryIndexName: s.All()}
 }
 
 // --- TwoIndexStore: the second real adapter (stdlib-only, multi-index) ------------
@@ -172,6 +197,39 @@ func (s *TwoIndexStore) All() []entry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// AllByIndex exposes BOTH backing indexes as separately-named copies so the residue
+// scan can prove "no residue in ANY index" and NAME the index a residue survives in
+// (task 008 / ADR-006):
+//
+//   - "primary":                 the authoritative id->entry copy (== All()).
+//   - "secondary-content-index": the content the secondary content-keyed index still
+//     holds, reconstructed from its surviving (content -> ids) links.
+//
+// Under a correct Delete both indexes stay consistent, so this names which index a
+// surviving residue copy lives in; were Delete ever to purge only the primary, the
+// stale content would surface HERE (and only here), which is exactly the multi-index
+// residue an All()-only (primary-keyed) scan would miss. The index *name* is a plain
+// string label chosen by the store — no backend type crosses the seam.
+func (s *TwoIndexStore) AllByIndex() map[string][]entry {
+	secondary := make([]entry, 0, len(s.byContent))
+	for content, ids := range s.byContent {
+		// Reconstruct the entry the secondary index still indexes. Carry the primary
+		// entry's identity/flags when the id is still present; the content is the
+		// residue-relevant payload the scan compares against.
+		for id := range ids {
+			if e, ok := s.primary[id]; ok {
+				secondary = append(secondary, e)
+			} else {
+				secondary = append(secondary, entry{content: content})
+			}
+		}
+	}
+	return map[string][]entry{
+		primaryIndexName:          s.All(),
+		"secondary-content-index": secondary,
+	}
 }
 
 // substringContains is the store-side substring predicate Scan uses. It is a thin alias
