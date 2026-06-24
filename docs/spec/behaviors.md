@@ -49,26 +49,34 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 ### B-003: Verify a deletion (`verify_delete`) — prove absence **and** scan for surviving residue
 
 - **Trigger:** `{"op":"verify_delete","id":…}` over IPC, or `MemoryGuard.VerifyDelete(id)` in-process.
-- **Response:** the guard (1) removes the entry keyed by `id` from the in-memory store, (2)
-  **re-checks** the store for that id (`confirmed:true` iff no longer present — the v0 proof), then
-  (3) **scans the remaining store for residue** of the just-deleted content and returns
+- **Response:** the guard (1) removes the entry keyed by `id` from the store **and every backing
+  index/copy**, (2) **re-checks** the store for that id (`confirmed:true` iff no longer present — the
+  v0 proof), then (3) **scans every backing index/copy of the remaining store for residue** of the
+  just-deleted content (via the `MemoryStore` seam's `AllByIndex()`, ADR-005/ADR-006) and returns
   `{ "confirmed", "residue_detected", "residue_summary"?, "deletion_hash" }`. `residue_detected:true`
-  means a verbatim or near-verbatim fragment of the deleted content survives in another entry (the
-  documented industry gap a bare `delete()` misses); when true, `residue_summary` names the match
-  class (`verbatim` / `normalized` / `phrase` / `token-overlap N%`) and the surviving entry. The
-  residue scan is a tiered, normalized substring / contiguous-phrase / token-overlap match (ADR-003) —
-  deterministic, **stdlib-only guard-side orchestration**, with **no** detector backend involvement.
-  `deletion_hash` is a deterministic SHA-256 over the deletion op (`id` + deleted content) for
+  means a verbatim or near-verbatim fragment of the deleted content survives in another entry **in any
+  index/copy** — including a secondary index a primary-only scan would miss (the documented industry
+  gap a bare `delete()` misses); when true, `residue_summary` names the match class (`verbatim` /
+  `normalized` / `phrase` / `token-overlap N%`), **the backing index the residue survives in**, and
+  the surviving entry. The residue scan is a tiered, normalized substring / contiguous-phrase /
+  token-overlap match, with number canonicalization that now also folds **spelled-out number-words**
+  (`five thousand` ⇆ `5000`) (ADR-003/ADR-006) — deterministic, **stdlib-only guard-side
+  orchestration**, with **no** detector backend involvement. `deletion_hash` is a deterministic
+  SHA-256 over the deletion op (`id` + deleted content), **independent of index layout**, for
   audit-trail linkage.
-- **Side effects:** removes the entry from the in-memory store (idempotent — deleting an absent id is a
-  no-op that still confirms gone). The scan is read-only over the survivors.
+- **Side effects:** removes the entry from the store and every secondary index/copy (idempotent —
+  deleting an absent id is a no-op that still confirms gone). The scan is read-only over the survivors.
 - **Failure modes:** deleting an unknown or already-deleted id still returns `confirmed:true,
   residue_detected:false` (no scan — there is no deleted content to scan for). Because the scan runs
-  over the store *after* the target is removed, a deleted entry never flags itself (no self-residue
-  false positive). Full semantic paraphrase is the known miss class of the substring/token method
-  (ADR-003), recorded honestly per residue class. *(Tests: `TestVerifyDeleteConfirmsAbsence` (v0 compat),
+  over the survivors *after* the target is removed from every index, a deleted entry never flags
+  itself (no self-residue false positive). The number-word paraphrase class is now caught (e.g. `$5000`
+  ⇆ "five thousand dollars"); **free-form synonym paraphrase** with no shared distinctive token
+  ("potted plant" → "planter") is the residual known-miss of the stdlib method (ADR-006), recorded
+  honestly per residue class. *(Tests: `TestVerifyDeleteConfirmsAbsence` (v0 compat),
   `TestVerifyDeleteReturnsResidueFields`, `TestVerifyDeleteTruthTable`, `TestResidueCorpusDetectionRate`,
-  `TestDeletionHashDeterministic`.)*
+  `TestDeletionHashDeterministic`, `TestResidueScanCoversEveryIndex`, `TestTruthTableAcrossIndexes`,
+  `TestMultiIndexResidueRate`, `TestParaphraseSubCorpusImprovedSeparately`,
+  `TestDeletionHashIndexIndependent`, `TestSingleIndexReducesToTask003Scan`.)*
 
 ### B-004: Serve over a `0600` Unix-socket IPC server (`serve`)
 

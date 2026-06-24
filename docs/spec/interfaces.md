@@ -77,7 +77,7 @@ type MemoryGuard struct { /* mu sync.Mutex; det Detector; store map[string]entry
 func NewMemoryGuard(det Detector) *MemoryGuard                                   // det == nil → default RegexDetector
 func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store; returns {allow, stored_id, flags}
 func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // substring scan → RedactPII; returns {allow, content_redacted, flags}
-func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors for residue; returns {confirmed, residue_detected, residue_summary?, deletion_hash}
+func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors across EVERY backing index/copy for residue; returns {confirmed, residue_detected, residue_summary?, deletion_hash}
 ```
 
 - **The store backend seam is the `Detector` plus the in-memory `store`** (`guard.go`). The detection
@@ -86,11 +86,13 @@ func (g *MemoryGuard) VerifyDelete(id string) map[string]any                    
 - **`ValidateWrite` is the write-gate** — it runs `DetectInjection` before storing and fails closed
   (`allow:false`, `stored_id:null`, no store mutation) on `injection_suspected`; otherwise it redacts
   PII, mints an opaque `stored_id`, and stores the redacted content.
-- **`VerifyDelete` proves absence and scans for residue** — it deletes, re-reads the store and reports
-  `confirmed` from that fresh check, then scans the remaining entries for a surviving fragment of the
-  deleted content (`residue_detected` + `residue_summary`), returning a deterministic `deletion_hash`
-  for audit linkage. The residue scan is guard-side stdlib logic (`residue.go`, ADR-003), not a
-  `Detector` concern — no detector-backend type appears in it.
+- **`VerifyDelete` proves absence and scans for residue across every index/copy** — it deletes,
+  re-reads the store and reports `confirmed` from that fresh check, then scans the remaining entries in
+  **every** backing index/copy (`MemoryStore.AllByIndex()`) for a surviving fragment of the deleted
+  content (`residue_detected` + `residue_summary`, the latter naming the index the residue survives
+  in), returning a deterministic, index-layout-independent `deletion_hash` for audit linkage. The
+  residue scan is guard-side stdlib logic (`residue.go`, ADR-003/ADR-006), not a `Detector` concern —
+  no detector-backend type appears in it.
 - **Stability:** the argument and return shapes are the contract. Changing them is an ADR-level
   decision. No detector-backend-specific type appears in the signatures — the boundary stays plain
   Go maps / JSON.

@@ -84,18 +84,21 @@ func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[st
 }
 
 // VerifyDelete deletes an entry and PROVES it is gone (post-deletion verification — ADR-001 §5,
-// ADR-003). It (1) removes the entry, (2) re-checks absence (the v0 proof), and (3) scans the
-// REMAINING store for residue of the deleted content — a verbatim or near-verbatim fragment that
-// survives in another entry (the documented industry gap a bare delete() misses). The residue
-// scan is deterministic, stdlib-only guard-side orchestration (residue.go); it is NOT a Detector
-// concern, so no detector backend specifics leak into it.
+// ADR-003, ADR-006). It (1) removes the entry, (2) re-checks absence (the v0 proof), and (3) scans
+// EVERY backing index/copy of the REMAINING store for residue of the deleted content — a verbatim
+// or near-verbatim fragment that survives in another entry, in any index (the documented industry
+// gap a bare delete() misses). The residue scan is deterministic, stdlib-only guard-side
+// orchestration (residue.go); it is NOT a Detector concern, so no detector backend specifics leak
+// into it, and it reaches the store only through the seam's AllByIndex().
 //
 // Returns { confirmed, residue_detected, residue_summary?, deletion_hash }:
 //   - confirmed       — the target id is gone (the v0 meaning, preserved). Deleting an absent id
 //     still confirms gone (idempotent).
-//   - residue_detected — a fragment of the deleted content survives elsewhere in the store.
-//   - residue_summary  — present only when residue_detected; names the class + the surviving entry.
-//   - deletion_hash    — deterministic SHA-256 over (id + deleted content) for audit-trail linkage.
+//   - residue_detected — a fragment of the deleted content survives elsewhere, in ANY backing index.
+//   - residue_summary  — present only when residue_detected; names the class, the BACKING INDEX the
+//     residue survives in, and the surviving entry.
+//   - deletion_hash    — deterministic SHA-256 over (id + deleted content) for audit-trail linkage,
+//     independent of index layout.
 func (g *MemoryGuard) VerifyDelete(id string) map[string]any {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -114,10 +117,11 @@ func (g *MemoryGuard) VerifyDelete(id string) map[string]any {
 	}
 
 	// Residue is only meaningful for content that actually existed and was removed. Scanning the
-	// SURVIVORS (the store after delete, across EVERY backing index via All()) means a deleted
-	// entry can never flag itself (no self-residue false positive — the truth-table edge case).
+	// SURVIVORS across EVERY backing index/copy (the store after delete, via AllByIndex()) means a
+	// deleted entry can never flag itself (no self-residue false positive — the truth-table edge
+	// case), and a residue surviving only in a secondary index is caught and NAMED (task 008).
 	if existed {
-		if detected, summary := residueScan(deleted.content, g.store.All()); detected {
+		if detected, summary := residueScanIndexes(deleted.content, g.store.AllByIndex()); detected {
 			out["residue_detected"] = true
 			out["residue_summary"] = summary
 		}
