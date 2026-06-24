@@ -227,11 +227,17 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   `NoOpSink` has zero allocation cost. A real transport (socket/HTTP/file) would add round-trip
   latency only when enabled — not on the default disabled path.
 - **Failure modes:** a nil or missing sink is silently treated as disabled. A panicking `Emit`
-  implementation is recovered. A slow `Emit` call on the hot path is a latency risk if the transport
-  is blocking — real transports should use the provided `ChannelSink` (non-blocking buffered channel)
-  pattern for async delivery. *(Tests: `TestAuditTC001_EventPerDetectionClass` through
-  `TestAuditTC007_ConfigGated`, including `TestAuditTC005_NoPIIInEvents` — the load-bearing no-raw-PII
-  assertion — and `TestAuditTC006_FailOpen` — the fail-open + panic-recovery assertion.)*
+  implementation is recovered (the guard continues). A **slow/blocking** sink must be wrapped in
+  `AsyncSink` (the non-blocking dispatch wrapper — bounded buffered channel + background drain
+  goroutine + drop-on-full + panic recovery in the drain) so the hot path never stalls waiting for a
+  slow transport: `AsyncSink.Emit` enqueues and returns immediately, and the slow forward happens off
+  the hot path; when the buffer is full the event is dropped (fail-open). Real network transports
+  (Unix socket / HTTP) are intended to be wired through `AsyncSink`; the synchronous in-process sinks
+  (`CollectingSink`, `NoOpSink`) stay synchronous. *(Tests: `TestAuditTC001_EventPerDetectionClass`
+  through `TestAuditTC007_ConfigGated`, including `TestAuditTC005_NoPIIInEvents` — the load-bearing
+  no-raw-PII assertion — `TestAuditTC006_FailOpen` (fail-open + panic-recovery +
+  `slow_sink_does_not_stall_hot_path`), `TestAsyncSinkNonBlocking`, and
+  `TestDeletionHashIndependentOfSinkState`.)*
 
 ---
 

@@ -166,6 +166,97 @@ type NoOpSink struct{}
 // Emit does nothing and returns nil. Used when emission is disabled (default).
 func (NoOpSink) Emit(_ OCSFEvent) error { return nil }
 
+// ─── AsyncSink (non-blocking dispatch wrapper) ───────────────────────────────
+
+// AsyncSink wraps any (possibly SLOW or blocking) AuditSink in a non-blocking,
+// fire-and-forget dispatch so a slow real transport can NEVER stall the hot path
+// (REQ-005 / TC-006-d). The hot-path Emit only enqueues onto a bounded buffered
+// channel and returns immediately; a single background goroutine drains the channel
+// and forwards each event to the wrapped sink. When the buffer is full, the event is
+// DROPPED (fail-open — availability over completeness), never blocking the caller.
+//
+// This is the dispatch real transports (Unix socket / HTTP / file) should use:
+// wrap the blocking transport sink in NewAsyncSink so a stalled audit-trail endpoint
+// degrades to dropped events, not a stalled memory hot path. The synchronous in-process
+// sinks (CollectingSink, NoOpSink) stay synchronous so the existing deterministic tests
+// observe every event without a drain race; AsyncSink is opt-in via the constructor.
+//
+// Lifecycle: NewAsyncSink starts the drain goroutine. Close stops it (idempotent).
+// A panicking wrapped sink is RECOVERED inside the drain goroutine, so a misbehaving
+// transport never crashes the process.
+type AsyncSink struct {
+	ch     chan OCSFEvent
+	inner  AuditSink
+	closed chan struct{}
+	once   sync.Once
+}
+
+// NewAsyncSink wraps inner in a non-blocking dispatch with a buffer of n events and
+// starts the background drain goroutine. A buffer of 0 is treated as 1 (a channel must
+// have capacity to be non-blocking for at least one in-flight event). The wrapped sink
+// is forwarded each event from the drain goroutine; the caller's Emit never blocks on it.
+func NewAsyncSink(inner AuditSink, n int) *AsyncSink {
+	if n < 1 {
+		n = 1
+	}
+	s := &AsyncSink{
+		ch:     make(chan OCSFEvent, n),
+		inner:  inner,
+		closed: make(chan struct{}),
+	}
+	go s.drain()
+	return s
+}
+
+// Emit enqueues the event non-blocking and returns immediately. If the buffer is full,
+// the event is dropped (returns an error the guard swallows). This is the call the guard's
+// emitSafe invokes on the hot path — it MUST NOT block on the wrapped (possibly slow) sink.
+func (s *AsyncSink) Emit(event OCSFEvent) error {
+	select {
+	case s.ch <- event:
+		return nil
+	case <-s.closed:
+		return fmt.Errorf("AsyncSink: closed, event dropped")
+	default:
+		return fmt.Errorf("AsyncSink: buffer full, event dropped")
+	}
+}
+
+// drain forwards buffered events to the wrapped sink one at a time, off the hot path.
+// A panic in the wrapped sink is recovered per-event so one bad event cannot kill the
+// drain goroutine or the process.
+func (s *AsyncSink) drain() {
+	for {
+		select {
+		case event := <-s.ch:
+			s.forward(event)
+		case <-s.closed:
+			// Drain any remaining buffered events best-effort, then exit.
+			for {
+				select {
+				case event := <-s.ch:
+					s.forward(event)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// forward calls the wrapped sink with panic recovery (fail-open inside the drain).
+func (s *AsyncSink) forward(event OCSFEvent) {
+	defer func() { _ = recover() }()
+	if s.inner != nil {
+		_ = s.inner.Emit(event)
+	}
+}
+
+// Close stops the drain goroutine (idempotent). Safe to call multiple times.
+func (s *AsyncSink) Close() {
+	s.once.Do(func() { close(s.closed) })
+}
+
 // ─── ChannelSink (in-process test transport) ─────────────────────────────────
 
 // ChannelSink is a non-blocking in-process sink suitable for tests and for future
@@ -270,6 +361,37 @@ type PanicSink struct{}
 func (PanicSink) Emit(_ OCSFEvent) error {
 	panic("PanicSink: intentional panic to test recovery")
 }
+
+// ─── SlowSink (blocking fake for TC-006-d async dispatch test) ───────────────
+
+// SlowSink blocks in Emit for a fixed delay, standing in for a slow/unresponsive
+// audit-trail transport. Wrapped in an AsyncSink, it proves the hot path does NOT
+// stall waiting for a slow sink (TC-006-d / REQ-005). The done channel records when
+// the (delayed) Emit finally completes, so a test can confirm the slow work happened
+// off the hot path rather than on it.
+type SlowSink struct {
+	delay time.Duration
+	done  chan struct{}
+}
+
+// NewSlowSink builds a SlowSink that sleeps delay per Emit and signals done on the
+// channel after the (first) sleep completes.
+func NewSlowSink(delay time.Duration) *SlowSink {
+	return &SlowSink{delay: delay, done: make(chan struct{}, 1)}
+}
+
+// Emit sleeps for the configured delay (simulating a slow transport) then signals done.
+func (s *SlowSink) Emit(_ OCSFEvent) error {
+	time.Sleep(s.delay)
+	select {
+	case s.done <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// Done returns the channel signalled after a (delayed) Emit completes.
+func (s *SlowSink) Done() <-chan struct{} { return s.done }
 
 // ─── Emission helpers ─────────────────────────────────────────────────────────
 

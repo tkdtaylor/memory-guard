@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ─── shared fixtures ──────────────────────────────────────────────────────────
@@ -428,30 +429,39 @@ func TestAuditTC006_FailOpen(t *testing.T) {
 		deleteVerdict map[string]any
 	}
 
+	// fixedID + fixedContent are seeded into BOTH guards' stores via the MemoryStore
+	// seam so the delete path operates on an IDENTICAL (id, content) pair — making
+	// deletion_hash (= deletionHash(id, content)) genuinely comparable working-vs-failing
+	// (GAP 2 / TC-006-c). The seeded content carries known PII so the delete is meaningful.
+	const fixedID = "mem-fixedseed01"
+	const fixedContent = "seeded note for deterministic deletion hash comparison"
+
+	// runOps takes a guard whose store has been pre-seeded with (fixedID, fixedContent),
+	// runs the op set, and deletes fixedID (the deterministic delete).
 	runOps := func(g *MemoryGuard) verdictSet {
 		piiW := g.ValidateWrite("contact alice@example.com", nil)
 		injW := g.ValidateWrite(injectionText, nil)
-		id, _ := piiW["stored_id"].(string)
-		var del map[string]any
-		if id != "" {
-			del = g.VerifyDelete(id)
-		} else {
-			del = g.VerifyDelete("nonexistent-id")
-		}
+		del := g.VerifyDelete(fixedID) // delete the SAME seeded id in both guards
 		return verdictSet{piiWrite: piiW, injWrite: injW, deleteVerdict: del}
 	}
 
-	// Run with a working (collecting) sink.
+	// Build a guard whose store is pre-seeded with the fixed (id, content) pair.
+	newSeededGuard := func(sink AuditSink) *MemoryGuard {
+		store := NewInMemoryStore()
+		store.Put(fixedID, entry{content: fixedContent})
+		return NewMemoryGuard(NewNativeDetector(), store).
+			WithAudit(AuditConfig{Enabled: true, Sink: sink})
+	}
+
+	// Run with a working (collecting) sink and with a failing sink, both seeded identically.
 	workingSink := &CollectingSink{}
-	gWorking := buildFakeGuard(workingSink)
+	gWorking := newSeededGuard(workingSink)
 	goodVerdicts := runOps(gWorking)
 
-	// Run with a failing sink.
-	gFailing := NewMemoryGuard(NewNativeDetector()).
-		WithAudit(AuditConfig{Enabled: true, Sink: FailingSink{}})
+	gFailing := newSeededGuard(FailingSink{})
 	failVerdicts := runOps(gFailing)
 
-	// Verdicts must be identical.
+	// compareFields asserts the named fields are byte-for-byte equal across the two maps.
 	compareFields := func(t *testing.T, label string, good, bad map[string]any, fields []string) {
 		t.Helper()
 		for _, f := range fields {
@@ -464,12 +474,27 @@ func TestAuditTC006_FailOpen(t *testing.T) {
 		}
 	}
 
+	// GAP 1 (TC-006-b): flags MUST be identical working-vs-failing for both writes.
+	// allow + flags compared for pii_write (stored_id is random per write, excluded).
 	compareFields(t, "pii_write", goodVerdicts.piiWrite, failVerdicts.piiWrite,
-		[]string{"allow"}) // stored_id differs (different randHex), but allow must match
+		[]string{"allow", "flags"})
+	// inj_write: allow, stored_id (nil in both), AND flags identical.
 	compareFields(t, "inj_write", goodVerdicts.injWrite, failVerdicts.injWrite,
-		[]string{"allow", "stored_id"})
+		[]string{"allow", "stored_id", "flags"})
+	// GAP 2 (TC-006-c): deletion_hash AND residue_detected identical working-vs-failing,
+	// because both guards deleted the SAME seeded (id, content) pair.
 	compareFields(t, "delete", goodVerdicts.deleteVerdict, failVerdicts.deleteVerdict,
-		[]string{"confirmed", "residue_detected"})
+		[]string{"confirmed", "residue_detected", "deletion_hash"})
+
+	// Defensive: confirm deletion_hash is actually present + well-formed in both (not "").
+	goodHash, _ := goodVerdicts.deleteVerdict["deletion_hash"].(string)
+	failHash, _ := failVerdicts.deleteVerdict["deletion_hash"].(string)
+	if goodHash == "" || failHash == "" {
+		t.Errorf("deletion_hash must be present in both: working=%q failing=%q", goodHash, failHash)
+	}
+	if goodHash != failHash {
+		t.Errorf("deletion_hash must be identical working-vs-failing: working=%q failing=%q", goodHash, failHash)
+	}
 
 	// The write-gate MUST remain fail-closed regardless of sink state.
 	if goodVerdicts.injWrite["allow"] != false {
@@ -505,26 +530,87 @@ func TestAuditTC006_FailOpen(t *testing.T) {
 		id, _ := writeOut["stored_id"].(string)
 		gPanic.VerifyDelete(id)
 	})
+
+	// GAP 3 (TC-006-d): a SLOW/blocking sink wrapped in AsyncSink must NOT stall the
+	// hot path. The slow Emit (sleeps well past a short deadline) runs off the hot path
+	// in the drain goroutine; the validate_* call returns under a tight time bound.
+	t.Run("slow_sink_does_not_stall_hot_path", func(t *testing.T) {
+		const slowDelay = 500 * time.Millisecond // far longer than the hot-path budget
+		const hotPathDeadline = 50 * time.Millisecond
+
+		slow := NewSlowSink(slowDelay)
+		async := NewAsyncSink(slow, 16)
+		defer async.Close()
+
+		g := NewMemoryGuard(NewNativeDetector()).
+			WithAudit(AuditConfig{Enabled: true, Sink: async})
+
+		// Time a hot-path call that WOULD emit (PII write). It must return fast despite
+		// the wrapped sink's 500ms sleep — the async dispatch enqueues and returns.
+		start := time.Now()
+		out := g.ValidateWrite("contact alice@example.com", nil)
+		elapsed := time.Since(start)
+
+		if elapsed >= hotPathDeadline {
+			t.Errorf("hot path stalled on slow sink: validate_write took %v (deadline %v) — async dispatch must not block",
+				elapsed, hotPathDeadline)
+		}
+		// Verdict must still be correct (write succeeded, PII flagged).
+		if out["allow"] != true {
+			t.Errorf("slow-sink write verdict wrong: expected allow:true, got %v", out["allow"])
+		}
+
+		// Write-gate stays fail-closed even with the slow async sink.
+		rej := g.ValidateWrite(injectionText, nil)
+		if rej["allow"] != false || rej["stored_id"] != nil {
+			t.Errorf("write-gate must stay fail-closed with slow async sink: %v", rej)
+		}
+
+		// Confirm the slow Emit DID eventually run off the hot path (the drain goroutine
+		// forwarded the event after the sleep) — proving the work happened later, not on
+		// the hot path. Wait up to slowDelay + margin.
+		select {
+		case <-slow.Done():
+			// good: the slow Emit completed off the hot path
+		case <-time.After(slowDelay + 2*time.Second):
+			t.Errorf("slow sink Emit never completed — async drain goroutine did not forward the event")
+		}
+	})
 }
 
 // ─── TC-007: config-gated, default-off, invalid-config → disabled ────────────
 
 func TestAuditTC007_ConfigGated(t *testing.T) {
 	t.Run("default_off_no_events", func(t *testing.T) {
-		// NewMemoryGuard with NO WithAudit call → g.audit == nil → zero emissions.
+		// GAP 4 (TC-007-a): inject a CollectingSink into a DEFAULT-OFF guard
+		// (Enabled:false, with a real sink supplied) and run operations that WOULD emit
+		// when enabled — a PII write, an injection rejection, and a residue-bearing delete.
+		// The default-off guard must capture ZERO events. This test FAILS if the default
+		// ever flips to on (unlike the previous no-op that never injected the sink).
 		sink := &CollectingSink{}
-		g := NewMemoryGuard(NewNativeDetector())
-		// We can't inject the sink without WithAudit; verify that the default guard
-		// emits NOTHING (by confirming g.audit is nil — the only way to observe this
-		// without modifying the struct directly is to confirm the WithAudit path is needed).
-		// Verify the guard still works correctly.
-		out := g.ValidateWrite("contact alice@example.com", nil)
-		if out["allow"] != true {
-			t.Errorf("expected allow:true for default guard, got %v", out["allow"])
+		store := NewInMemoryStore()
+		// Seed a survivor so the delete below would trigger a residue event IF enabled.
+		store.Put("mem-seed-survivor", entry{content: "secret-codeword-alpha balance $5000 retained"})
+		g := NewMemoryGuard(NewNativeDetector(), store).
+			WithAudit(AuditConfig{Enabled: false, Sink: sink}) // default-OFF: Enabled false
+
+		// (a) a PII write — would emit pii_redaction if enabled.
+		piiOut := g.ValidateWrite("contact alice@example.com for the secret-codeword-alpha plan", nil)
+		if piiOut["allow"] != true {
+			t.Errorf("expected allow:true for PII write, got %v", piiOut["allow"])
 		}
-		// The collecting sink was never injected, so it stays empty (zero events from default guard).
+		// (b) an injection rejection — would emit injection_rejected if enabled.
+		injOut := g.ValidateWrite(injectionText, nil)
+		if injOut["allow"] != false {
+			t.Errorf("expected allow:false for injection, got %v", injOut["allow"])
+		}
+		// (c) a residue-bearing delete — would emit residue_found/deletion if enabled.
+		storedID, _ := piiOut["stored_id"].(string)
+		g.VerifyDelete(storedID)
+
+		// The injected sink MUST stay empty — default-off emits nothing.
 		if sink.Count() != 0 {
-			t.Errorf("default (no audit) guard must not emit to an external sink; sink count = %d", sink.Count())
+			t.Errorf("default-off (Enabled:false) guard must emit ZERO events even with a sink injected; got %d", sink.Count())
 		}
 	})
 
@@ -643,5 +729,82 @@ func TestAuditSeverityMapping(t *testing.T) {
 	res := BuildDeletionEvent("abc123hash", true, []string{"residue_detected"})
 	if res.SeverityID != ocsfSeverityMedium {
 		t.Errorf("residue event severity want %d got %d", ocsfSeverityMedium, res.SeverityID)
+	}
+}
+
+// ─── GAP 2 belt-and-suspenders: deletion_hash is sink-state-independent ───────
+
+// TestDeletionHashIndependentOfSinkState proves the deletion_hash a verify_delete
+// returns is a pure function of (id, content) and is unaffected by which AuditSink
+// (working / failing / panicking / absent) is wired in. This is the focused unit
+// backing TC-006-c: deletion_hash equality working-vs-failing is genuine because the
+// hash never reads sink state.
+func TestDeletionHashIndependentOfSinkState(t *testing.T) {
+	const id = "mem-hashcheck01"
+	const content = "deterministic content for sink-independent deletion hash"
+
+	// The raw hash function is the source of truth — independent of any sink.
+	wantHash := deletionHash(id, content)
+
+	type sinkCase struct {
+		name string
+		sink AuditSink
+		on   bool
+	}
+	cases := []sinkCase{
+		{"working", &CollectingSink{}, true},
+		{"failing", FailingSink{}, true},
+		{"panicking", PanicSink{}, true},
+		{"disabled", &CollectingSink{}, false},
+		{"absent", nil, false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewInMemoryStore()
+			store.Put(id, entry{content: content})
+			g := NewMemoryGuard(NewNativeDetector(), store)
+			if tc.sink != nil || tc.on {
+				g = g.WithAudit(AuditConfig{Enabled: tc.on, Sink: tc.sink})
+			}
+			out := g.VerifyDelete(id)
+			got, _ := out["deletion_hash"].(string)
+			if got != wantHash {
+				t.Errorf("[%s] deletion_hash %q != expected %q — hash must not depend on sink state",
+					tc.name, got, wantHash)
+			}
+		})
+	}
+}
+
+// ─── GAP 3 unit: AsyncSink forwards off the hot path without blocking Emit ────
+
+// TestAsyncSinkNonBlocking proves AsyncSink.Emit returns immediately even when the
+// wrapped sink is slow, and that the event is eventually forwarded to the wrapped sink
+// off the caller's path (the drain goroutine). Complements the guard-level TC-006-d test.
+func TestAsyncSinkNonBlocking(t *testing.T) {
+	const slowDelay = 300 * time.Millisecond
+	slow := NewSlowSink(slowDelay)
+	async := NewAsyncSink(slow, 8)
+	defer async.Close()
+
+	// Emit must return well under the slow delay (it only enqueues).
+	start := time.Now()
+	if err := async.Emit(BuildPIIRedactionEvent([]string{"pii:EMAIL"}, "mem-x")); err != nil {
+		t.Fatalf("AsyncSink.Emit returned unexpected error: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed >= slowDelay {
+		t.Errorf("AsyncSink.Emit blocked %v (slow delay %v) — it must enqueue and return immediately",
+			elapsed, slowDelay)
+	}
+
+	// The wrapped slow sink must eventually receive the event (off the hot path).
+	select {
+	case <-slow.Done():
+		// good
+	case <-time.After(slowDelay + 2*time.Second):
+		t.Errorf("wrapped slow sink never received the forwarded event")
 	}
 }

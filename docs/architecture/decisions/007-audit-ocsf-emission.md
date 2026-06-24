@@ -91,9 +91,38 @@ This is why emission is **default-DISABLED** (see §3 below).
 - `CollectingSink`: thread-safe in-memory fake for tests.
 - `FailingSink`: always returns an error; proves TC-006 (fail-open).
 - `PanicSink`: always panics; proves the `recover()` wrapper.
+- `SlowSink`: blocks for a fixed delay; proves the async dispatch keeps the hot path unstalled.
 - `NoOpSink`: zero-cost no-op; used when emission is disabled.
 - `ChannelSink`: non-blocking buffered channel for optional async use.
+- `AsyncSink`: the non-blocking dispatch wrapper (see §6).
 - `WithAudit(AuditConfig)`: builder method on `*MemoryGuard`; the single injection point.
+
+### 6. Async (non-blocking) dispatch for slow transports
+
+REQ-005 requires that a **slow/blocking** sink must not stall the hot path. `emitSafe` is
+**synchronous** — it calls `Emit` inline. A synchronous fast sink (the default `NoOpSink`, the
+in-process `CollectingSink`) is correct and keeps tests deterministic (every event is observable
+with no drain race). But a real network transport (a Unix socket to audit-trail, an HTTP POST) can
+block, and a synchronous blocking `Emit` *would* stall `validate_*`.
+
+**Decision:** real transports are wrapped in `AsyncSink` (added in this task). `AsyncSink`:
+
+- Hot-path `Emit` only **enqueues** the event onto a bounded buffered channel and returns
+  immediately (fire-and-forget). It never blocks on the wrapped (slow) sink.
+- A single background **drain goroutine** forwards each buffered event to the wrapped transport,
+  off the hot path.
+- When the buffer is **full**, the event is **dropped** (fail-open — availability over
+  completeness; a slow audit-trail degrades to dropped events, never a stalled memory hot path).
+- A panic in the wrapped sink is **recovered** inside the drain goroutine, so a misbehaving
+  transport never crashes the process.
+- `Close()` stops the drain goroutine (idempotent), draining remaining buffered events best-effort.
+
+The synchronous in-process sinks stay synchronous; `AsyncSink` is **opt-in** via `NewAsyncSink`,
+intended for the real-transport wiring once the audit-trail endpoint is confirmed. This keeps the
+deterministic unit tests free of drain races while making the slow-transport invariant provable
+(`TestAuditTC006_FailOpen/slow_sink_does_not_stall_hot_path` wraps a 500 ms `SlowSink` in an
+`AsyncSink` and asserts the hot-path call returns under a 50 ms bound, with the slow `Emit`
+completing later off the hot path).
 
 ### 3. Fail-open posture and config gate
 

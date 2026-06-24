@@ -167,11 +167,17 @@ type AuditConfig struct {
 func (g *MemoryGuard) WithAudit(cfg AuditConfig) *MemoryGuard  // builder: injects the sink; returns a new guard
 
 // Provided implementations:
-type NoOpSink struct{}       // zero-cost no-op (default when disabled)
+type NoOpSink struct{}        // zero-cost no-op (default when disabled)
 type CollectingSink struct{}  // thread-safe in-memory capture for tests
 type FailingSink struct{}     // always returns error (proves fail-open in tests)
 type PanicSink struct{}       // always panics (proves recover() wrapper in tests)
+type SlowSink struct{}        // blocks per Emit (proves AsyncSink keeps the hot path unstalled)
 type ChannelSink struct{}     // non-blocking buffered channel for optional async delivery
+
+// Non-blocking dispatch wrapper for slow real transports (ADR-007 §6):
+func NewAsyncSink(inner AuditSink, n int) *AsyncSink  // wraps inner; Emit enqueues + returns; drain goroutine forwards
+func (s *AsyncSink) Emit(event OCSFEvent) error        // non-blocking; drops on full buffer (fail-open)
+func (s *AsyncSink) Close()                            // stops the drain goroutine (idempotent)
 ```
 
 - The `AuditSink` is the **third pluggable seam** (alongside `Detector` and `MemoryStore`). The
@@ -180,6 +186,9 @@ type ChannelSink struct{}     // non-blocking buffered channel for optional asyn
 - `(*MemoryGuard).WithAudit` is the **single injection point**. The fitness seam check
   (`TestFitnessSeam`) continues to pass after this change — `audit` is an interface field, not a
   transport token.
+- A **slow/blocking** transport must be wrapped in `AsyncSink` (non-blocking dispatch — enqueue +
+  background drain + drop-on-full) so the hot path never stalls (REQ-005 / ADR-007 §6). The
+  synchronous in-process sinks (`CollectingSink`, `NoOpSink`) stay synchronous.
 - Emission is always **fail-open** (via `emitSafe`): errors swallowed, panics recovered, nil = no-op.
 - The OCSF event shape is defined in `audit.go` (`OCSFEvent` / `OCSFFinding`); see ADR-007 for the
   shape rationale and the documented assumption about the public OCSF schema.
