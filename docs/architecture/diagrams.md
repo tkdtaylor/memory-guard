@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-06-21 (task 003 — verify_delete residue scan, ADR-003)
+**Last updated:** 2026-06-24 (task 006 — MemoryStore seam + stdlib second adapter, ADR-005)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -10,10 +10,12 @@ diagrams render.
 These diagrams are part of the **authoritative spec**. Code changes that contradict a diagram either
 invalidate the change or the diagram; one must be updated to match the other in the same commit.
 
-> memory-guard is a single deployable binary that gates the agent's memory I/O. Its one load-bearing
-> internal boundary is the `Detector` seam (detection backend); its external integrations are the
-> agent core (the three `validate_*`/`verify_delete` verbs) and `audit-trail` (detection events, v1 —
-> not wired in v0). Container and Component collapse into one diagram.
+> memory-guard is a single deployable binary that gates the agent's memory I/O. It has **two**
+> load-bearing internal boundaries: the `Detector` seam (detection backend) and the `MemoryStore` seam
+> (the storage backend — ADR-005, a single in-memory map or a multi-index store, swapped one-line
+> behind the verbs). Its external integrations are the agent core (the three
+> `validate_*`/`verify_delete` verbs) and `audit-trail` (detection events, v1 — not wired in v0).
+> Container and Component collapse into one diagram.
 
 ---
 
@@ -27,13 +29,13 @@ C4Context
     System(memguard, "memory-guard", "Agent memory-I/O gate (ASI06): write-gate + PII redaction + post-deletion verification")
     Person(operator, "Operator", "Runs the daemon / the write|read demo")
 
-    System_Ext(store, "Memory store", "The backing MemoryStore (LangChain / LlamaIndex / SQLite / vector store); v0 is an in-memory map behind the verbs")
+    System_Ext(store, "Memory store", "The backing MemoryStore behind the seam (ADR-005); ships as a stdlib in-memory map or a multi-index store; a LangChain / LlamaIndex / SQLite / vector backend slots in behind the same verbs")
     System_Ext(audit, "audit-trail", "Receives detection events (OCSF) — v1; not wired in v0")
     System_Ext(armor, "armor", "Guards the tool-call / web-ingestion path; memory-guard guards what gets STORED")
 
     Rel(agent, memguard, "validate_write / validate_read / verify_delete", "JSON / Unix socket")
     Rel(operator, memguard, "serve / write / read", "CLI")
-    Rel(memguard, store, "store / scan / delete (in-memory map in v0)", "behind the validate_* seam")
+    Rel(memguard, store, "Put / Scan / Get / Delete / All", "behind the MemoryStore seam (ADR-005)")
     Rel(memguard, audit, "detection events (flags → OCSF)", "v1, not wired in v0")
 ```
 
@@ -57,7 +59,8 @@ C4Component
     Container_Boundary(boundary, "memory-guard binary") {
         Component(main, "CLI", "main.go", "serve / write / read subcommands; parse --socket; print WriteResult/ReadResult JSON for the one-shot demos; exit 2 on a missing/unknown subcommand")
         Component(ipc, "IPC server", "ipc.go", "serve: remove stale socket, bind 0600 Unix socket, frame newline-delimited JSON, dispatch validate_write/validate_read/verify_delete/ping over a shared *MemoryGuard; structured error shape {error:{code,message,retryable}}")
-        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store), ValidateRead (scan store → RedactPII), VerifyDelete (delete → re-check absence → scan survivors for residue, ADR-003: tiered normalized substring/phrase/token-overlap, stdlib-only, returns confirmed/residue_detected/residue_summary?/deletion_hash)); in-memory store map[string]entry behind a sync.Mutex; mints opaque stored_id from crypto/rand")
+        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store.Put), ValidateRead (store.Scan → RedactPII), VerifyDelete (store.Delete → re-check absence via store.Get → scan store.All() survivors for residue, ADR-003: tiered normalized substring/phrase/token-overlap, stdlib-only, returns confirmed/residue_detected/residue_summary?/deletion_hash)); talks to the store ONLY through the MemoryStore seam behind a sync.Mutex; mints opaque stored_id from crypto/rand")
+        Component(store, "MemoryStore seam", "store.go", "MemoryStore interface (Put / Get / Delete / Scan / All) + two stdlib backings: InMemoryStore (the default single map[string]entry) and TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both). The boundary that isolates the storage backend; ADR-005")
         Component(detector, "Detector seam", "detector.go", "Detector interface (RedactPII / DetectInjection) + the v0 RegexDetector (Presidio stand-in): EMAIL/US_SSN/CREDIT_CARD/API_KEY recognizers; ignore/disregard-instructions, system-prompt, <system>/<instructions> injection patterns. The boundary that isolates the detection backend")
     }
 
@@ -67,11 +70,15 @@ C4Component
     Rel(main, guard, "write/read demos call ValidateWrite/ValidateRead in-process")
     Rel(ipc, guard, "dispatch op → ValidateWrite / ValidateRead / VerifyDelete")
     Rel(guard, detector, "DetectInjection (before store) + RedactPII (before store & on read)")
+    Rel(guard, store, "Put / Get / Delete / Scan / All (only string/entry/[]entry cross the seam)")
 ```
 
-> **The `Detector` seam is the one swap point (ADR-001 §3).** The v0 `RegexDetector` can be replaced
-> by a Presidio-backed detector (sidecar / ONNX) or a Go-native NER model **behind the `Detector`
-> interface** — `MemoryGuard`, `ipc.go`, and the contract do not change. The detector deployment shape
+> **Two swap points — the `Detector` seam (ADR-001 §3) and the `MemoryStore` seam (ADR-005).** The v0
+> `RegexDetector` can be replaced by a Presidio-backed detector (sidecar / ONNX) or a Go-native NER
+> model **behind the `Detector` interface**; the default `InMemoryStore` can be replaced by a
+> multi-index, persistent, or third-party store **behind the `MemoryStore` interface**. In both cases
+> `MemoryGuard`, `ipc.go`, and the contract do not change — only `string` / `entry` / `[]entry` cross
+> the storage seam, only `string` / `[]string` cross the detection seam. The detector deployment shape
 > and the hot-path latency budget are deferred to the memory-guard tracer.
 
 **Key contracts**
@@ -102,7 +109,7 @@ sequenceDiagram
     participant IPC as IPC server (ipc.go)
     participant Guard as MemoryGuard (guard.go)
     participant Det as Detector (detector.go)
-    participant Store as In-memory store
+    participant Store as MemoryStore seam (store.go)
 
     Note over Agent,IPC: validate_write over the 0600 Unix socket
     Agent->>IPC: {"op":"validate_write","entry":"…","identity":{…}}
@@ -120,7 +127,7 @@ sequenceDiagram
             Det-->>Guard: nil
             Guard->>Det: RedactPII(entry)
             Det-->>Guard: redacted, ("pii:EMAIL",…)
-            Guard->>Store: store key "mem-"+randHex(6) = { redacted, identity, flags }
+            Guard->>Store: Put("mem-"+randHex(6), { redacted, identity, flags })
             Guard-->>IPC: { allow:true, stored_id:"mem-…", flags:(…) }
             IPC-->>Agent: { allow:true, stored_id:"mem-…", flags:(…) }
             Note over Agent: agent gets an opaque stored_id, never the raw value
@@ -130,7 +137,7 @@ sequenceDiagram
     Note over Agent,Store: later — validate_read redacts again on the way out
     Agent->>IPC: {"op":"validate_read","query":"contact"}
     IPC->>Guard: ValidateRead("contact", identity)
-    Guard->>Store: scan for entries containing the query
+    Guard->>Store: Scan(query) → entries containing the query
     Guard->>Det: RedactPII(join(hits))
     Guard-->>IPC: { allow:true, content_redacted:"…<EMAIL>…", flags:(…) }
     IPC-->>Agent: { allow:true, content_redacted:"…", flags:(…) }
@@ -138,7 +145,7 @@ sequenceDiagram
     Note over Agent,Store: verify_delete proves absence AND scans survivors for residue
     Agent->>IPC: {"op":"verify_delete","id":"mem-…"}
     IPC->>Guard: VerifyDelete("mem-…")
-    Guard->>Store: delete(id), re-check presence, scan survivors for residue (ADR-003)
+    Guard->>Store: Delete(id), re-check absence via Get(id), scan All() survivors across every index for residue (ADR-003)
     Guard-->>IPC: { confirmed:true, residue_detected:bool, residue_summary?, deletion_hash }
     IPC-->>Agent: { confirmed:true, residue_detected:…, deletion_hash:… }
 ```

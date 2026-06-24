@@ -52,9 +52,12 @@ const strongTokenMinLen = 8
 
 // residueScan scans the surviving entries for residue of the just-deleted content. It returns
 // whether residue was detected and a human-readable summary of the first (highest-confidence)
-// match. survivors is the remaining store AFTER the target entry has been removed, so an entry
-// whose own content is the residue source cannot flag itself once deleted (no self-residue FP).
-func residueScan(deletedContent string, survivors map[string]entry) (detected bool, summary string) {
+// match. survivors is the remaining store AFTER the target entry has been removed — supplied as
+// the store's All() across EVERY backing index/copy — so an entry whose own content is the
+// residue source cannot flag itself once deleted (no self-residue FP). It receives []entry rather
+// than the raw map so it stays decoupled from the MemoryStore backing: a single- or multi-index
+// store hands the same survivor slice across the seam.
+func residueScan(deletedContent string, survivors []entry) (detected bool, summary string) {
 	deletedContent = strings.TrimSpace(deletedContent)
 	if deletedContent == "" {
 		return false, ""
@@ -63,24 +66,27 @@ func residueScan(deletedContent string, survivors map[string]entry) (detected bo
 	normDeleted := normalizeForResidue(deletedContent)
 	delTokens := distinctiveTokens(deletedContent)
 
-	// Deterministic iteration order so the reported summary is stable across runs.
-	ids := make([]string, 0, len(survivors))
-	for id := range survivors {
-		ids = append(ids, id)
+	// Deterministic scan order so the reported summary is stable across runs and identical across
+	// store backings (a map-backed store and a multi-index store iterate in different native orders,
+	// but residue parity must not depend on that). Sort survivors by content.
+	contents := make([]string, 0, len(survivors))
+	for _, e := range survivors {
+		contents = append(contents, e.content)
 	}
-	sort.Strings(ids)
+	sort.Strings(contents)
 
-	for _, id := range ids {
-		survivor := survivors[id].content
+	for _, survivor := range contents {
+		// label the survivor by a short content snippet (the store no longer exposes ids here).
+		survivorLabel := survivorRef(survivor)
 
 		// Tier 1: exact substring of the distinctive fragment.
 		if frag := exactFragmentMatch(deletedContent, survivor); frag != "" {
-			return true, residueSummary("verbatim", id, frag)
+			return true, residueSummary("verbatim", survivorLabel, frag)
 		}
 
 		// Tier 2: normalized (number/currency-canonicalized) substring.
 		if frag := normalizedFragmentMatch(normDeleted, survivor); frag != "" {
-			return true, residueSummary("normalized", id, frag)
+			return true, residueSummary("normalized", survivorLabel, frag)
 		}
 
 		// Tier 2b: contiguous distinctive phrase — a contiguous span of the deleted content (kept
@@ -90,13 +96,13 @@ func residueScan(deletedContent string, survivors map[string]entry) (detected bo
 		// their own, while staying precise (a 3-distinctive-token contiguous phrase is rarely
 		// coincidental).
 		if frag := phraseMatch(normDeleted, survivor); frag != "" {
-			return true, residueSummary("phrase", id, frag)
+			return true, residueSummary("phrase", survivorLabel, frag)
 		}
 
 		// Tier 3: distinctive-token overlap above threshold.
 		if ratio, ok := tokenOverlapMatch(delTokens, survivor); ok {
 			return true, residueSummary(
-				fmt.Sprintf("token-overlap %.0f%%", ratio*100), id, survivor)
+				fmt.Sprintf("token-overlap %.0f%%", ratio*100), survivorLabel, survivor)
 		}
 	}
 	return false, ""
@@ -104,14 +110,29 @@ func residueScan(deletedContent string, survivors map[string]entry) (detected bo
 
 // residueSummary renders the operator-visible summary string. It quotes the matched fragment so
 // a human can see WHAT survived and WHERE — without restating the full (already-deleted) content.
-func residueSummary(class, survivorID, fragment string) string {
+// survivorRef is a short, stable reference to the surviving entry (a content snippet), since the
+// residue scan now operates over the store's All() survivors across every backing index rather
+// than over raw map ids.
+func residueSummary(class, survivorRef, fragment string) string {
 	frag := fragment
 	const maxFrag = 80
 	if len(frag) > maxFrag {
 		frag = frag[:maxFrag] + "…"
 	}
 	return fmt.Sprintf("%s residue of deleted content survives in entry %s: %q",
-		class, survivorID, frag)
+		class, survivorRef, frag)
+}
+
+// survivorRef renders a short, stable label for a surviving entry from its content (a quoted
+// snippet), used in the residue summary now that survivors arrive as []entry across the seam
+// rather than as id-keyed map values.
+func survivorRef(content string) string {
+	const maxRef = 32
+	snippet := content
+	if len(snippet) > maxRef {
+		snippet = snippet[:maxRef] + "…"
+	}
+	return fmt.Sprintf("%q", snippet)
 }
 
 // --- tier 1: exact fragment match -------------------------------------------------------------
