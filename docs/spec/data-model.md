@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 006)
+**Last updated:** 2026-06-24 (task 009 — entry bound-identity key + typed identity)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -30,10 +30,12 @@ deferred, not foreclosed.
 ### State: `MemoryGuard.store` — the entry store (behind the `MemoryStore` seam)
 
 - **Shape:** a `MemoryStore` (interface, `store.go`), **not** a raw map. Entries are keyed by the
-  opaque `stored_id` (a `"mem-"+randHex(6)` string). `entry { content string; identity map[string]any;
+  opaque `stored_id` (a `"mem-"+randHex(6)` string). `entry { content string; boundIdentity string;
   flags []string }` (`guard.go`). `content` is the **redacted** content (PII already replaced by
-  `<LABEL>` placeholders by `RedactPII` at write time — the raw value is never stored). `flags` is the
-  PII/injection metadata recorded at write.
+  `<LABEL>` placeholders by `RedactPII` at write time — the raw value is never stored). `boundIdentity`
+  is the **normalized identity key** bound at write (the writer's `Principal.Subject()` when attested,
+  else the unbound marker) — the key `validate_read` matches **exactly** against (ADR-004). `flags` is
+  the PII/injection metadata recorded at write.
 - **Owner:** the `MemoryGuard` value (`guard.go`), shared by the IPC server across connections. The
   guard reaches the store **only** through the seam verbs — `Put` (clean write), `Scan` (read), `Get`
   (the post-delete absence proof), `Delete`, and `All` (the residue-scan survivors).
@@ -52,15 +54,21 @@ deferred, not foreclosed.
 
 ```go
 type entry struct {
-    content  string         // the REDACTED content (PII already <LABEL>-replaced); never the raw value
-    identity map[string]any // the writer's identity, as supplied to validate_write (not yet enforced)
-    flags    []string       // PII/injection metadata recorded at write (e.g. "pii:EMAIL")
+    content       string   // the REDACTED content (PII already <LABEL>-replaced); never the raw value
+    boundIdentity string   // the writer's normalized identity key (Principal.Subject() if attested, else "" — the unbound marker); the EXACT key validate_read matches against (ADR-004)
+    flags         []string // PII/injection metadata recorded at write (e.g. "pii:EMAIL")
 }
 ```
 
 - **Held in:** the `MemoryStore` behind `MemoryGuard.store` (`guard.go`, `store.go`). It is the only
   representation of a memory record the store keeps. The raw (pre-redaction) value is **never** present
   at rest.
+- **`boundIdentity` is set ONLY in `ValidateWrite`** (via `boundKeyFor(principalFromMap(identity))`) and
+  read ONLY in `ValidateRead`'s identity filter — one write site, one read site, one derivation, so the
+  key bound at write is exactly the key matched at read (ADR-004). An attested writer binds its
+  `Subject()` (the SPIFFE ID); an unattested/absent writer binds the **unbound** marker (`""`) — **not**
+  a wildcard. The typed identity wire shape (`{spiffe_id, trust_tier}`) is decoded into a `Principal` at
+  the IPC boundary and never stored as a raw map; only the normalized key persists.
 
 ### Seam: `MemoryStore` (the storage backend) and its two stdlib adapters
 
@@ -163,8 +171,13 @@ response line back.
 ### Format: `validate_write` request / response
 
 ```json
-{ "op":"validate_write", "entry":"contact alice@example.com", "identity":{ "agent":"agent-1" } }
+{ "op":"validate_write", "entry":"contact alice@example.com",
+  "identity":{ "spiffe_id":"spiffe://example.org/agent/agent-1", "trust_tier":"attested" } }
 ```
+
+The `identity` is the typed principal `{spiffe_id, trust_tier}` (ADR-004), decoded through the
+`Principal` seam. The stored entry records the writer's normalized **bound-identity key** (the attested
+`spiffe_id`, else the unbound marker), not the raw map.
 
 → clean write:
 
@@ -184,12 +197,16 @@ raw value. `flags` is `[]` (never `null`) on a clean write with no PII.
 ### Format: `validate_read` request / response
 
 ```json
-{ "op":"validate_read", "query":"contact", "identity":{ … } }
+{ "op":"validate_read", "query":"contact",
+  "identity":{ "spiffe_id":"spiffe://example.org/agent/agent-1", "trust_tier":"attested" } }
 ```
 
-→ `{ "allow": true, "content_redacted": "contact <EMAIL>", "flags": ["pii:EMAIL"] }` — the joined
-matching contents, PII-redacted again on the way out. A query matching nothing → empty
-`content_redacted` and `flags: []`. v0 always `allow:true`.
+→ `{ "allow": true, "content_redacted": "contact <EMAIL>", "flags": ["pii:EMAIL"] }` — the contents
+matching the query **and** the reader's identity, joined and PII-redacted again on the way out. The
+result is **identity-scoped** (ADR-004): an attested reader sees only entries bound to its **exact**
+`spiffe_id`; an unattested/absent reader sees only **unbound** entries (never an identity-bound entry,
+never the whole store). A query (or identity) matching nothing → empty `content_redacted` and
+`flags: []`. v0 always `allow:true`.
 
 ### Format: `verify_delete` request / response
 
@@ -275,6 +292,14 @@ All current errors are `retryable:false`. Codes:
   participates.
 - **`deletion_hash` is deterministic.** It is a pure function (SHA-256) of the deletion op (`id` +
   deleted content) — reproducible across runs and processes, with no randomness.
+- **Each entry carries exactly one bound-identity key, set at write and matched exactly at read.**
+  `boundIdentity` is written only by `ValidateWrite` and read only by `ValidateRead`'s identity filter;
+  matching is **exact** on the normalized key (no substring/fuzzy — `tenant-1` never matches
+  `tenant-12`). An unattested/absent principal binds and matches the **unbound** marker only — it never
+  reaches an identity-bound entry (fail-closed w.r.t. bound entries).
+- **No identity-backend-specific type crosses the wire or the store.** `identity` is plain JSON
+  (`{spiffe_id, trust_tier}`) decoded into a `Principal` at the boundary; no SPIFFE/X.509/Ed25519 type
+  enters `guard.go`, `ipc.go`, or the stored `entry` — only the normalized key persists (ADR-004).
 - **No detector-backend-specific type crosses the wire** — the contract is plain JSON
   (`allow`/`stored_id`/`content_redacted`/`flags`/`confirmed`), so a future detection backend
   (Presidio / ONNX / NER) slots in behind the `Detector` interface unchanged.

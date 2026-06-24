@@ -25,12 +25,17 @@
 
 ## Pre-implementation checklist
 
-- [ ] All test cases below are defined
-- [ ] Expected inputs and outputs are specified for each case
-- [ ] Edge cases and error paths are covered
-- [ ] Every REQ-ID from the task has at least one test case
-- [ ] **EXTERNAL — a verifiable identity (SVID / A2A principal) is available to bind and assert**
-- [ ] No-identity fallback policy (deny vs. unbound-only) decided before TC-005 is finalized
+- [x] All test cases below are defined
+- [x] Expected inputs and outputs are specified for each case
+- [x] Edge cases and error paths are covered
+- [x] Every REQ-ID from the task has at least one test case
+- [x] **EXTERNAL — a verifiable identity (SVID / A2A principal) is available to bind and assert** —
+      satisfied via the pre-verified principal contract (ADR-004): agent-mesh owns SVID verification and
+      emits `{spiffe_id, trust_tier}`; the guard binds/matches the normalized `spiffe_id` through the
+      `Principal` seam (`PreVerifiedPrincipal`). Unit tests use the typed wire shape directly.
+- [x] No-identity fallback policy (deny vs. unbound-only) decided before TC-005 is finalized —
+      **UNBOUND-ONLY** (ADR-004, ratified): an unattested/absent reader sees only entries written with no
+      bound identity, never an identity-bound entry, never the whole store.
 
 ## Test fixtures
 

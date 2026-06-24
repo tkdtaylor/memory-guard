@@ -26,9 +26,15 @@ type MemoryGuard struct {
 }
 
 type entry struct {
-	content  string
-	identity map[string]any
-	flags    []string
+	content string
+	// boundIdentity is the normalized identity key bound to this entry at write time
+	// (the writer's Principal.Subject(), or unboundKey for an unattested/absent
+	// writer). This is the load-bearing key the read path matches EXACTLY against —
+	// it replaces the inert free-form identity map as the basis for isolation
+	// (ADR-004). It is set ONLY in ValidateWrite via boundKeyFor; nothing else writes
+	// it, so the bound-at-write key is exactly the matched-at-read key.
+	boundIdentity string
+	flags         []string
 }
 
 // NewMemoryGuard wires the guard with a Detector and (optionally) a MemoryStore. Both
@@ -54,6 +60,13 @@ func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard {
 }
 
 // ValidateWrite is the write-gate: flag poisoning (fail-closed), redact PII, then store.
+//
+// It also BINDS the writer's verifiable identity to the stored entry (ADR-004 /
+// task 009): the typed identity ({spiffe_id, trust_tier}) is parsed through the
+// Principal seam and the entry records the writer's normalized identity key
+// (boundKeyFor — the attested Subject(), else the unbound marker). That key is what
+// the read path matches EXACTLY against; the inert free-form map is no longer the
+// basis for isolation. No SPIFFE/X.509 specifics enter here — only Principal.
 func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any {
 	flags := g.det.DetectInjection(text)
 	redacted, piiFlags := g.det.RedactPII(text)
@@ -63,19 +76,35 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 		// fail-closed on suspected context poisoning: do not store
 		return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
 	}
+	boundKey := boundKeyFor(principalFromMap(identity)) // producer: the identity bound at write
 	g.mu.Lock()
 	id := "mem-" + randHex(6)
-	g.store.Put(id, entry{content: redacted, identity: identity, flags: flags})
+	g.store.Put(id, entry{content: redacted, boundIdentity: boundKey, flags: flags})
 	g.mu.Unlock()
 	return map[string]any{"allow": true, "stored_id": id, "flags": flagsOrEmpty(flags)}
 }
 
-// ValidateRead returns matching content with PII redacted (defense in depth).
+// ValidateRead returns matching content for the READER'S identity, with PII redacted
+// (defense in depth). Identity is now LOAD-BEARING (ADR-004 / task 009): the whole-
+// store substring scan is REPLACED by an identity-scoped lookup.
+//
+//   - An attested reader sees ONLY entries bound to its EXACT Subject() (no
+//     substring/fuzzy on the identity — "tenant-1" never matches "tenant-12").
+//   - An unattested or absent reader hits the unbound-only fallback (REQ-005): it
+//     sees ONLY entries written with no bound identity (public/system entries) —
+//     NEVER an identity-bound entry, NEVER the whole store. Fail-closed w.r.t. bound
+//     entries, and it keeps the v0 identity-less demo working.
+//
+// Matching is guard-side orchestration through the Principal seam; PII redaction on
+// the scoped result set is unchanged, and no detector specifics enter the identity path.
 func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any {
+	wantKey, _ := readerVisibilityKey(principalFromMap(identity)) // consumer: the key matched at read
 	g.mu.Lock()
 	var hits []string
 	for _, e := range g.store.Scan(query) {
-		hits = append(hits, e.content)
+		if e.boundIdentity == wantKey { // EXACT identity match — the isolation gate
+			hits = append(hits, e.content)
+		}
 	}
 	g.mu.Unlock()
 	redacted, flags := g.det.RedactPII(strings.Join(hits, "\n"))

@@ -2,7 +2,15 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-24
-**Status:** backlog (startable — pending the identity-propagation contract decision; see below)
+**Status:** completed 2026-06-24 (🟡 code merged; ADR-004 ratified; spec-verifier pending before ✅)
+
+> ## ✅ COMPLETED 2026-06-24 — identity-propagation contract pinned (ADR-004 Accepted), isolation shipped.
+> Reads are now identity-scoped: a writer's entry is returned only under a matching **attested** identity
+> (`{spiffe_id, trust_tier}`), with an **unbound-only** fallback for unattested/absent readers. Bound at
+> write via the `Principal` seam (`principal.go`, `PreVerifiedPrincipal`), matched EXACT at read; no
+> SPIFFE/X.509 in the guard, `go.mod` require-free. Linear identity filter over the task-006
+> `MemoryStore` seam (per-identity index is the durable form). Verified L6 over a live `serve` socket.
+> The original re-scoping note is preserved below for history.
 
 > ## 🔜 STARTABLE — re-scoped 2026-06-24 (was ⛔ fully blocked)
 >
@@ -99,29 +107,33 @@ Requirements describe the **target** behavior once unblocked. Per-REQ blocker ca
 - [x] **Verifiable identity issuer exists** — agent-mesh ships X.509-SVID issuance + a fail-closed
       verification path (tracer-validated; mock issuer now, live SPIRE deferred behind its
       `SvidProvider` seam). *vault dropped — not an identity source.*
-- [ ] **Identity-propagation contract pinned** — the verified-SPIFFE-claim shape memory-guard receives
-      on each `validate_*`, and who verifies it. **Recommended: pre-verified SPIFFE principal (ID +
-      `trust_tier`), verified upstream by agent-mesh, not re-verified in-guard** — ratify in the REQ-007
-      ADR. *(This is the one decision that gates the start.)*
-- [ ] Task 006 (real `MemoryStore` seam + adapter, roadmap T1) landed, or a decision to ship 009 as a
-      linear identity filter over the v0 map first — **recommended dependency; per-identity indexing is
-      the durable form**
-- [ ] No-identity / unauthenticated read policy decided (deny vs. unbound-only) — REQ-005
+- [x] **Identity-propagation contract pinned** — pre-verified SPIFFE principal `{spiffe_id, trust_tier}`,
+      verified upstream by agent-mesh, not re-verified in-guard; ratified in **ADR-004** (Accepted).
+      Implemented via the `Principal` seam (`principal.go`).
+- [x] Task 006 landed; 009 ships as a **linear identity filter** over the task-006 `MemoryStore` seam
+      (`Scan` + exact `boundIdentity` match). Per-identity index noted as the durable form (ADR-004).
+- [x] No-identity / unauthenticated read policy decided — **UNBOUND-ONLY** (REQ-005, ADR-004).
 
 ## Acceptance criteria
 
 > **Cannot start until the upstream identity model exists.** These criteria are authored ahead; they
 > become checkable only after the readiness gate's external-dependency items are satisfied.
 
-- [ ] [REQ-001] `validate_write` binds a normalized verifiable identity to the entry (TC-001).
-- [ ] [REQ-002] `validate_read` returns an entry only under a matching identity (TC-002).
-- [ ] [REQ-003] Writer A's entry is **not** returned to reader B despite a matching query (TC-003).
-- [ ] [REQ-004] The whole-store substring read is replaced by an identity-scoped lookup; same identity
-      still returns the entry (TC-004).
-- [ ] [REQ-005] No-identity read follows the documented fallback policy, not return-everything (TC-005).
-- [ ] [REQ-006] PII redaction on read unchanged; no detector specifics in the identity path (TC-006).
-- [ ] [REQ-007] ADR records the identity binding/matching model (TC-007).
-- [ ] `go build ./... && go test ./...` green.
+- [x] [REQ-001] `validate_write` binds a normalized verifiable identity to the entry (TC-001) —
+      `TestWriteBindsVerifiableIdentity`.
+- [x] [REQ-002] `validate_read` returns an entry only under a matching identity (TC-002) —
+      `TestReadReturnsOnlyMatchingIdentity`.
+- [x] [REQ-003] Writer A's entry is **not** returned to reader B despite a matching query (TC-003) —
+      `TestNoCrossIdentityLeakage` (load-bearing); confirmed L6 over a live socket.
+- [x] [REQ-004] The whole-store substring read is replaced by an identity-scoped lookup; same identity
+      still returns the entry (TC-004) — `TestIdentityScopedLookupReplacesWholeStoreScan` (incl.
+      substring-bleed edge).
+- [x] [REQ-005] No-identity read follows the **unbound-only** fallback, not return-everything (TC-005) —
+      `TestNoIdentityReadIsUnboundOnly`.
+- [x] [REQ-006] PII redaction on read unchanged; no detector specifics in the identity path (TC-006) —
+      `TestPIIRedactionUnchangedUnderIdentityScoping`; `make fitness` seam gate green.
+- [x] [REQ-007] ADR-004 ratified Proposed→Accepted; "To confirm" filled (TC-007).
+- [x] `go build ./... && go test ./...` green.
 
 ## Verification plan
 
