@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-06-24 (task 008 — residue proof across every backing index/copy via `AllByIndex()`; stdlib number-word paraphrase, ADR-006)
+**Last updated:** 2026-06-24 (task 009 — identity-scoped reads: typed `{spiffe_id, trust_tier}` principal bound at write, exact-match filter at read, unbound-only fallback; ADR-004)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -88,8 +88,9 @@ C4Component
   an opaque `stored_id` (from `crypto/rand`) is returned — never the raw value (`guard.go::ValidateWrite`,
   ADR-001 §1).
 - `validate_read(query, identity) -> { allow, content_redacted, flags }` — scans the store for
-  substring hits and returns them **PII-redacted** (defense in depth); v0 always `allow:true`
-  (`guard.go::ValidateRead`).
+  substring hits, **filters them by identity** (an attested reader sees only its exact `Subject()`'s
+  entries; an unattested/absent reader sees only **unbound** entries — ADR-004), and returns the
+  survivors **PII-redacted** (defense in depth); v0 always `allow:true` (`guard.go::ValidateRead`).
 - `verify_delete(id) -> { confirmed, residue_detected, residue_summary?, deletion_hash }` — deletes,
   **re-checks the store** to prove absence, then **scans the surviving entries across every backing
   index/copy** (`store.AllByIndex()`) for residue of the deleted content, naming the index it survives
@@ -128,18 +129,20 @@ sequenceDiagram
             Det-->>Guard: nil
             Guard->>Det: RedactPII(entry)
             Det-->>Guard: redacted, ("pii:EMAIL",…)
-            Guard->>Store: Put("mem-"+randHex(6), { redacted, identity, flags })
+            Note over Guard: bind writer identity via Principal seam (principal.go): boundKey = attested Subject() else unbound
+            Guard->>Store: Put("mem-"+randHex(6), { redacted, boundIdentity:boundKey, flags })
             Guard-->>IPC: { allow:true, stored_id:"mem-…", flags:(…) }
             IPC-->>Agent: { allow:true, stored_id:"mem-…", flags:(…) }
             Note over Agent: agent gets an opaque stored_id, never the raw value
         end
     end
 
-    Note over Agent,Store: later — validate_read redacts again on the way out
-    Agent->>IPC: {"op":"validate_read","query":"contact"}
+    Note over Agent,Store: later — validate_read is identity-scoped, then redacts on the way out
+    Agent->>IPC: {"op":"validate_read","query":"contact","identity":{"spiffe_id":"…","trust_tier":"attested"}}
     IPC->>Guard: ValidateRead("contact", identity)
     Guard->>Store: Scan(query) → entries containing the query
-    Guard->>Det: RedactPII(join(hits))
+    Note over Guard: keep only entries whose boundIdentity == reader's key (exact match, unattested/absent → unbound-only)
+    Guard->>Det: RedactPII(join(identity-scoped hits))
     Guard-->>IPC: { allow:true, content_redacted:"…<EMAIL>…", flags:(…) }
     IPC-->>Agent: { allow:true, content_redacted:"…", flags:(…) }
 

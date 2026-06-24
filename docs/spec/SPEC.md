@@ -95,8 +95,13 @@ in `docs/plans/` / `docs/tasks/`):
   persists across a restart.
 - **`verify_delete` proves absence only in the in-memory store.** v1 extends the proof to **every
   index/copy** (semantic residue detection — the documented gap).
-- **No identity-scoped access.** `validate_read` / `validate_write` carry an `identity` but do not yet
-  enforce tenant isolation; reads match by substring across the whole store, regardless of writer.
+- **Identity-scoped reads are enforced; the index and in-guard verification are not yet final.**
+  `validate_read` returns a writer's entry only under a **matching attested** identity (`{spiffe_id,
+  trust_tier}`), with an **unbound-only** fallback for unattested/absent readers (ADR-004 / task 009).
+  Enforcement is a **linear identity filter** over the store — the durable form is a per-identity
+  index/partition behind the `MemoryStore` seam (deferred). Identity is **pre-verified upstream**
+  (agent-mesh); in-guard SVID verification (`SvidVerifyingPrincipal`) is deferred behind the `Principal`
+  seam.
 - **No adversarial poisoning test-suite.** The v0 injection detector is regex-based; the
   MINJA-/GRAGPoison-class adversarial suite the write-gate is measured against is v1.
 - **No audit-trail emission.** Detections are returned as `flags` but not yet emitted as OCSF events to

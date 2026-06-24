@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-06-19 (task 003)
+**Last updated:** 2026-06-24 (task 009 — typed identity + identity-scoped reads)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -40,14 +40,18 @@ Subcommands:
 
 The agent surface. Newline-delimited JSON over the Unix socket bound by `serve --socket`. One request
 object per connection (read up to the first `\n`); the connection closes after the response. The
-optional `identity` field is parsed (`req["identity"]` as a map) and carried into the call, but is not
-yet enforced for access control in v0.
+`identity` field is the **typed principal** `{ "spiffe_id": string, "trust_tier": string }` (ADR-004) —
+parsed (`req["identity"]` as a map) and decoded through the `Principal` seam, then **enforced** on
+`validate_read`: a writer's entry is returned only under a **matching attested** identity (see below).
+`identity` is **pre-verified upstream** (agent-mesh owns SVID issuance + verification and emits
+`trust_tier == "attested"` on success); the guard trusts the claim across the `0600` socket and adds no
+in-guard SVID/X.509 verification (deferred behind the `Principal` seam).
 
 | Op | Request | Response |
 |----|---------|----------|
 | `ping` | `{"op":"ping"}` | `{"ok":true}` |
-| `validate_write` | `{"op":"validate_write","entry":…,"identity":{…}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` — **the raw value is never returned; a poisoned write never persists** |
-| `validate_read` | `{"op":"validate_read","query":…,"identity":{…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — matching contents joined and **PII-redacted on the way out** |
+| `validate_write` | `{"op":"validate_write","entry":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` — **the raw value is never returned; a poisoned write never persists; the entry is bound to the writer's identity key** |
+| `validate_read` | `{"op":"validate_read","query":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — contents matching the query **AND** the reader's identity, joined and **PII-redacted on the way out**. An attested reader sees only its **exact** `spiffe_id`'s entries; an unattested/absent reader sees only **unbound** entries (never an identity-bound entry, never the whole store) |
 | `verify_delete` | `{"op":"verify_delete","id":…}` | `{"confirmed":true,"residue_detected":bool,"residue_summary"?:…,"deletion_hash":…}` — fresh post-delete presence check **plus** a residue scan of the remaining store; `residue_summary` present only when `residue_detected:true`; `deletion_hash` is a deterministic SHA-256 of the deletion op |
 | *(other / malformed)* | any unparseable / unknown op | `{"error":{"code","message","retryable":false}}` (`bad_request` / `unknown_op`) |
 
@@ -74,9 +78,9 @@ wired). A Presidio-backed `Detector` (v1) would call out to a sidecar/subprocess
 ```go
 type MemoryGuard struct { /* mu sync.Mutex; det Detector; store map[string]entry */ }
 
-func NewMemoryGuard(det Detector) *MemoryGuard                                   // det == nil → default RegexDetector
-func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store; returns {allow, stored_id, flags}
-func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // substring scan → RedactPII; returns {allow, content_redacted, flags}
+func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard             // det == nil → default RegexDetector; omitted store → default InMemoryStore
+func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store BOUND TO the writer's Principal.Subject() (ADR-004); returns {allow, stored_id, flags}
+func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // substring scan → identity-scoped EXACT filter (attested Subject(), else unbound-only) → RedactPII; returns {allow, content_redacted, flags}
 func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors across EVERY backing index/copy for residue; returns {confirmed, residue_detected, residue_summary?, deletion_hash}
 ```
 
@@ -113,6 +117,29 @@ func NewNativeDetector() *NativeDetector                        // v1 production
 func (d *NativeDetector) RedactPII(text string) (string, []string)
 func (d *NativeDetector) DetectInjection(text string) []string
 ```
+
+### Type: `Principal` — the identity seam (ADR-004)
+
+```go
+type Principal interface {
+    Subject() string   // normalized identity key (the SPIFFE ID); "" if none — the EXACT match key
+    Attested() bool    // trust_tier == "attested"; isolation enforced ONLY when true
+}
+
+type PreVerifiedPrincipal struct { /* spiffeID, trustTier string */ }   // v1 default: TRUSTS the caller-supplied {spiffe_id, trust_tier}
+func (p PreVerifiedPrincipal) Subject() string
+func (p PreVerifiedPrincipal) Attested() bool
+```
+
+- **The identity seam** (`principal.go`) isolates *how identity is obtained/verified* from *how it is
+  bound at write and matched at read*. The typed wire shape `{spiffe_id, trust_tier}` is decoded into a
+  `Principal` (`principalFromMap`) at the IPC boundary; the guard sees only `Subject()` / `Attested()` —
+  no SPIFFE/X.509/Ed25519 detail crosses the seam into `guard.go` or `ipc.go`.
+- **`PreVerifiedPrincipal` is the v1 default** (ADR-004 option 1): verification stays upstream
+  (agent-mesh); the guard trusts the pre-verified claim across the `0600` socket. A zero-trust
+  `SvidVerifyingPrincipal` (parse + verify an SVID + bundle in-process) is **deferred** behind this same
+  seam — additive, no guard change. Matching is **exact** on the normalized `Subject()`; binding and
+  matching go through one derivation so the key bound at write is exactly the key matched at read.
 
 ---
 

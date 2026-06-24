@@ -1,6 +1,6 @@
 # ADR-004 — Identity propagation: a pre-verified SPIFFE principal, not in-guard SVID verification
 
-**Status:** Proposed (recommended direction; ratified when [task 009](../../tasks/backlog/009-identity-scoped-read-isolation.md) implements)
+**Status:** Accepted (ratified 2026-06-24 by [task 009](../../tasks/completed/009-identity-scoped-read-isolation.md), which implements it — `Principal` seam in `principal.go`, binding/matching in `guard.go`)
 **Date:** 2026-06-24
 **Refines:** the identity model left open in [ADR-001](001-foundational-stack.md) — `identity` is carried on `validate_*` today but **not enforced**.
 **Task:** [009 — Identity-scoped read isolation (R1 / roadmap T4)](../../tasks/backlog/009-identity-scoped-read-isolation.md) (REQ-007 — this ADR is its deliverable).
@@ -117,16 +117,45 @@ re-architecture.
   `Principal` seam — this ADR defers it, it does not foreclose it (mirroring ADR-002's treatment of
   Presidio).
 
-## To confirm at implementation (task 009)
+## Confirmed at implementation (task 009 — ratified 2026-06-24)
 
-> This ADR is **Proposed**; task 009 ratifies it and fills these in, then flips the status to Accepted.
+> Ratified: status flipped Proposed → **Accepted**. The open items are resolved as follows.
 
-- **No-identity / unattested fallback policy** — REQ-005: **deny** vs. **unbound-only**. Pin one and
-  record it here and in `behaviors.md`.
-- **`trust_tier` vocabulary** — confirm the exact set agent-mesh emits (`attested` / `unattested` / …)
-  and the precise predicate `Attested()` uses, against agent-mesh's published contract.
-- **Durable index** — with task 006's real `MemoryStore`, prefer a **per-identity index/partition** for
-  the scoped lookup over a linear identity filter; 009 may ship the linear filter over the v0 map first
-  and note the index as the durable form.
-- **Spec propagation** — update `docs/spec/interfaces.md` (the typed `identity` shape) and
-  `docs/spec/data-model.md` (the entry's bound-identity key) in the same commit as the 009 code.
+- **No-identity / unattested fallback policy — UNBOUND-ONLY (REQ-005).** An unattested or absent
+  principal returns **only** entries that were themselves written with **no bound identity**
+  (public/system entries — bound to the `unboundKey` marker); it **never** returns an identity-bound
+  entry and **never** returns-everything. This is **fail-closed w.r.t. bound entries** (the security
+  property: a forged/unverified caller reaches no isolated tenant data) while keeping the v0 demo
+  (`go run . write/read`, which carries no identity) working — identity-less writes are readable by
+  identity-less reads. Recorded in `behaviors.md` (B-002, B-008) and `data-model.md` (the entry's
+  `boundIdentity`). *(Considered and rejected: hard **deny**. Unbound-only is strictly safer than
+  "return everything" and, unlike deny, preserves the public/system-memory use case and the v0 demo
+  without weakening tenant isolation — bound entries stay invisible either way.)*
+
+- **`trust_tier` predicate — `Attested()` ⇔ `trust_tier == "attested"`.** The guard treats the single
+  literal value `"attested"` (the tier agent-mesh emits on a successful SVID chain → trust-bundle →
+  URI-SAN → signature → replay verification) as attested; **every** other value (`""`, `"unattested"`,
+  any unknown string) is **not** attested and routes to the unbound-only fallback. The literal lives in
+  one place behind the seam (`attestedTier` in `principal.go`); broadening the accepted vocabulary, if
+  agent-mesh adds tiers, is a one-constant change there with no guard/IPC impact. **Matching of the
+  identity itself is EXACT** on the normalized `Subject()` (the trimmed SPIFFE ID) — no substring/fuzzy,
+  so `tenant-1` never matches `tenant-12`.
+
+- **Durable index — per-identity index/partition is the durable form; 009 ships the linear filter.**
+  Task 009 ships a **linear identity filter** over the task-006 `MemoryStore` seam: `validate_read`
+  calls `Scan(query)` and keeps only entries whose `boundIdentity` exactly equals the reader's
+  visibility key. This is correct and behind the seam, but O(store) per read. The **durable form** is a
+  **per-identity index/partition** (`identity → entries`) exposed through the `MemoryStore` seam so the
+  scoped lookup is O(matches), not O(store) — a store-internal change behind the **unchanged**
+  `validate_*` verbs and `Principal` seam, deferred to a future task. Recorded here so a future reader
+  knows the linear filter is the v0 mechanics, not the intended steady state.
+
+- **Spec propagation — done in the 009 feat commit.** `docs/spec/interfaces.md` (the typed `identity`
+  `{spiffe_id, trust_tier}` shape + the `Principal` seam), `docs/spec/data-model.md` (the entry's
+  `boundIdentity` key, replacing the inert `identity map`), and `docs/spec/behaviors.md` (B-001/B-002
+  rewritten + B-008 the isolation behavior) were updated in the same commit as the code.
+
+- **Deferred behind the seam (recorded, not built here):** `SvidVerifyingPrincipal` — the zero-trust
+  variant that parses + verifies an X.509-SVID + trust bundle in-process — is **not** implemented in
+  009. It is a future, additive `Principal` impl with no guard/IPC change. No X.509 / SPIFFE-PEM /
+  Ed25519 parsing was added to `guard.go` or `ipc.go`; `go.mod` stays require-free.

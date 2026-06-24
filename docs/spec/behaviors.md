@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** memory-guard
-**Last updated:** 2026-06-19
+**Last updated:** 2026-06-24 (task 009 — identity-scoped read isolation)
 
 What the system does, observably — triggering condition, response, externally-visible side effects,
 failure modes. The "you can verify this from outside the process" view.
@@ -22,29 +22,45 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   `{ "allow": false, "stored_id": null, "flags": [ …, "injection_suspected" ] }` — and **nothing is
   stored**. Otherwise the content is **PII-redacted** (`Detector.RedactPII`, PII → `<LABEL>`
   placeholders), an opaque `stored_id` of the form `mem-<hex>` is minted from `crypto/rand`, the
-  **redacted** content is inserted into the in-memory store under that id, and the guard returns
-  `{ "allow": true, "stored_id": "mem-…", "flags": […] }`. `flags` carries the PII categories found
-  (e.g. `pii:EMAIL`) as informational metadata.
+  **redacted** content is inserted into the in-memory store under that id **bound to the writer's
+  identity**, and the guard returns `{ "allow": true, "stored_id": "mem-…", "flags": […] }`. `flags`
+  carries the PII categories found (e.g. `pii:EMAIL`) as informational metadata.
+- **Identity binding (ADR-004):** the typed `identity` (`{spiffe_id, trust_tier}`) is decoded through
+  the `Principal` seam and the entry records a **normalized bound-identity key** — the writer's
+  `Subject()` (the SPIFFE ID) when the principal is **attested**, else the **unbound** marker. This key
+  is what `validate_read` matches against (B-002, B-008). A write with no attested identity binds the
+  unbound marker — **not** a wildcard that matches everyone. No SPIFFE/X.509 specifics enter the guard;
+  only `Principal` crosses the seam.
 - **Side effects:** on a clean write, mutates the in-memory store (with the **redacted** content +
-  identity + flags). On a rejected write, no store mutation.
+  the bound-identity key + flags). On a rejected write, no store mutation.
 - **Failure modes:** a write flagged for poisoning never persists (the write-gate). The raw PII is
   **never** stored — only the redacted form. The agent receives the opaque `stored_id`, **never** the
   raw value. *(Tests: `TestWriteGateRejectsSuspectedInjection`, `TestWriteRedactsPIIAndStores`, `TestPoisoningRecallPrecision`, `TestPoisoningFailClosedPerCase` — adversarial recall=0.69, precision=0.85 on the v0 4-pattern regex; measured 2026-06-19 against 32-case corpus; see fitness-functions.md F-006.)*
 
-### B-002: Validate a memory read (`validate_read`) — redact PII on the way out
+### B-002: Validate a memory read (`validate_read`) — identity-scoped, redact PII on the way out
 
 - **Trigger:** `{"op":"validate_read","query":…,"identity":{…}}` over IPC, or
   `MemoryGuard.ValidateRead(query, identity)` in-process (the `read` CLI subcommand).
-- **Response:** the guard scans the in-memory store for entries whose content **contains the query
-  substring**, joins the matching contents with newlines, runs `Detector.RedactPII` over the joined
-  result (defense in depth — PII redacted again on read), and returns
-  `{ "allow": true, "content_redacted": "…", "flags": […] }`. v0 always returns `allow:true`; `flags`
-  carries any PII categories the read-time redaction found.
+- **Response:** the guard scans the store for entries whose content **contains the query substring**,
+  then **filters that set by identity** (B-008): it keeps only entries whose bound-identity key matches
+  the reader's visibility key (see below). It joins the surviving contents with newlines, runs
+  `Detector.RedactPII` over the joined result (defense in depth — PII redacted again on read), and
+  returns `{ "allow": true, "content_redacted": "…", "flags": […] }`. v0 always returns `allow:true`;
+  `flags` carries any PII categories the read-time redaction found.
+- **Identity scoping (ADR-004):** the reader's visibility key comes from the `Principal` seam:
+  - an **attested** reader sees **only** entries bound to its **exact** `Subject()` (no substring/fuzzy
+    on the identity — `tenant-1` never matches `tenant-12`);
+  - an **unattested or absent** reader sees **only** entries written with **no** bound identity
+    (the **unbound-only** fallback, REQ-005) — **never** an identity-bound entry, **never** the whole
+    store.
 - **Side effects:** none (read-only).
-- **Failure modes:** a query matching no entries yields an empty `content_redacted` and an empty
-  `flags`. PII that somehow reached the store is still redacted on the way out. *(Test:
-  `TestWriteRedactsPIIAndStores` — the read half asserts `<EMAIL>` present and `alice@example.com`
-  absent.)*
+- **Failure modes:** a query matching no entries — or no entries under the reader's identity — yields an
+  empty `content_redacted` and an empty `flags`. A non-matching entry is **excluded entirely** (invisible,
+  not merely redacted). PII that somehow reached the store is still redacted on the way out. *(Tests:
+  `TestReadReturnsOnlyMatchingIdentity`, `TestNoCrossIdentityLeakage`,
+  `TestIdentityScopedLookupReplacesWholeStoreScan`, `TestNoIdentityReadIsUnboundOnly`,
+  `TestPIIRedactionUnchangedUnderIdentityScoping`, and `TestWriteRedactsPIIAndStores` — the read half
+  asserts `<EMAIL>` present and `alice@example.com` absent.)*
 
 ### B-003: Verify a deletion (`verify_delete`) — prove absence **and** scan for surviving residue
 
@@ -124,6 +140,27 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 - **Failure modes:** if the seed text itself trips the write-gate (looks like injection), nothing is
   stored and the read returns empty content. *(No automated test for the CLI wrapper.)*
 
+### B-008: Identity-scoped read isolation — a writer's entries are visible only under a matching identity
+
+- **Trigger:** any `validate_read` carrying an `identity` (`{spiffe_id, trust_tier}`), against a store
+  holding entries bound to different identities at write time (B-001).
+- **Response:** the read result is **scoped by identity** (ADR-004 / task 009): writer A's entry is
+  returned to a reader **only** when the reader is **attested** and its `Subject()` **exactly** matches
+  A's bound key. Writer A's entry is **never** returned to reader B — even when B's query substring
+  matches A's content **verbatim**. The isolation holds **because of identity**, not because the query
+  failed to match. An unattested/absent reader gets the **unbound-only** set (B-002) — only entries
+  written with no bound identity, never an identity-bound entry, never the whole store.
+- **Side effects:** none (read-only). Enforced via a guard-side **linear identity filter** over the
+  `MemoryStore` seam's `Scan` (the durable form is a per-identity index/partition behind the same seam —
+  ADR-004, deferred). Identity matching is guard-side orchestration through the `Principal` seam — **not**
+  a `Detector` concern; no detector backend specifics enter the identity path.
+- **Failure modes:** a forged or unverified (`trust_tier != "attested"`) identity matches **nothing**
+  bound — it falls to the unbound-only set, never through to the whole store (fail-closed w.r.t. bound
+  entries). PII redaction still runs on whatever the scoped set returns. *(Tests:
+  `TestNoCrossIdentityLeakage` (load-bearing), `TestReadReturnsOnlyMatchingIdentity`,
+  `TestWriteBindsVerifiableIdentity`, `TestIdentityScopedLookupReplacesWholeStoreScan`,
+  `TestNoIdentityReadIsUnboundOnly`, `TestPrincipalSeamSemantics`; L6 over a live `serve` socket.)*
+
 ---
 
 ## Behavioral invariants
@@ -146,9 +183,19 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   detail.
 - **Every malformed / unknown request fails closed.** An unparseable request or an unknown op returns
   the structured error shape; nothing is stored or returned.
+- **Reads are identity-scoped (fail-closed w.r.t. bound entries).** A writer's entry is visible only to
+  an **attested** reader with an **exactly** matching `Subject()`; an unattested/absent reader sees only
+  **unbound** (public/system) entries. A non-matching identity is never returned an identity-bound entry
+  and never the whole store. Identity verification stays upstream (agent-mesh); the guard trusts the
+  pre-verified `trust_tier` across the `0600` socket (ADR-004) and keeps SPIFFE/X.509 specifics behind
+  the `Principal` seam.
 
-> **v0 scope note.** The store is an in-memory map, the detector is regex, reads match by substring
-> across the whole store (no identity-scoped isolation), and detections are not yet emitted to
-> `audit-trail`. These are stated facts about v0, tracked as limitations in [SPEC.md](SPEC.md) and
-> [fitness-functions.md](fitness-functions.md), not behaviors to rely on as final.
+> **v0 scope note.** The store is an in-memory map and the detector is regex; reads are now
+> **identity-scoped** (ADR-004 / task 009 — a writer's entries are returned only under a matching
+> attested identity, with an unbound-only fallback), via a **linear identity filter** (the durable form
+> is a per-identity index behind the `MemoryStore` seam — deferred). Identity is **pre-verified
+> upstream** (agent-mesh); in-guard SVID verification (`SvidVerifyingPrincipal`) is deferred behind the
+> `Principal` seam. Detections are not yet emitted to `audit-trail`. These are stated facts about v0,
+> tracked as limitations in [SPEC.md](SPEC.md) and [fitness-functions.md](fitness-functions.md), not
+> behaviors to rely on as final.
 </content>
