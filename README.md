@@ -29,9 +29,13 @@ validate_write(entry, identity) -> { allow, stored_id, flags }
 verify_delete(id)               -> { confirmed, residue_detected, residue_summary?, deletion_hash }
 ```
 
-> Note: memory-guard was **out of the tracer-bullet scope** (the slice is stateless,
-> tracer-bullet.md §6) — its contract gets its own tracer once memory is in play. This v0 is
-> a skeleton against the v0 contract shape, not yet tracer-validated.
+> Note: these contract shapes are **tracer-validated** — memory-guard's own tracer-bullet
+> (roadmap T6, [ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)) drives
+> `validate_write → validate_read → verify_delete` over the live `serve` socket against the real
+> `MemoryStore` seam, asserting each verb's response field-by-field on the JSON decoded off the
+> socket. The shapes validated **unchanged**. (The detector dimension was validated against the v0
+> `NativeDetector`; a real-Presidio-backend re-validation is a noted follow-up — shapes are
+> detector-agnostic behind the `Detector` seam.)
 
 ## Build & run
 
@@ -54,9 +58,9 @@ IPC: `{"op":"validate_write","entry":"…"}` · `{"op":"validate_read","query":"
 
 ## Status
 
-🚧 **v0 substrate.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), in-memory store (MemoryStore stand-in), and post-deletion verification with residue detection + deletion-hash.
+🟢 **Contract tracer-validated; real-detector backend pending.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), a real `MemoryStore` seam (`InMemoryStore` default + multi-index `TwoIndexStore`), identity bound-and-matched, and post-deletion verification with multi-index residue detection + deletion-hash. The `validate_*`/`verify_delete` contract is tracer-validated over the live `serve` socket (T6 / ADR-008).
 
-The five historically "v1"-labelled tasks (001–005) shipped and are ✅ verified — but they **harden the v0 substrate, they do not make this a v1**: detection is still regex/Go-native (no Presidio/NER), the store is still an in-memory map, identity is carried-but-not-enforced, and the contract is **not yet tracer-validated**. A true v1 needs a real detection backend, a real MemoryStore, identity enforcement, audit emission, and a contract tracer — see [Toward a true v1](docs/plans/roadmap.md#toward-a-true-v1-substrate-not-just-tasks) in the roadmap.
+The five historically "v1"-labelled tasks (001–005) hardened the v0 substrate; tasks 006–011 then made the load-bearing stand-ins real: a real `MemoryStore` seam (006/008), identity bound-and-matched (009), audit emission (010, default-off), and — the gating item — a **tracer-validated contract** (011, [ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)): the `validate_*`/`verify_delete` shapes are now proven against the live `serve` socket with a real store and a real consumer, validated **unchanged**. The one remaining open v1 dimension is the **real detection backend** (Presidio, task 007 — still regex/Go-native today); the contract tracer recorded that the detector dimension was validated against the v0 backend and left the real-backend re-validation as a noted follow-up. See [Toward a true v1](docs/plans/roadmap.md#toward-a-true-v1-substrate-not-just-tasks) in the roadmap.
 
 ## Adapter seam & standards
 

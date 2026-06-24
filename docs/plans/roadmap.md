@@ -23,8 +23,11 @@ stand-in). Pure Go, **stdlib only**. The `Detector` interface + the `validate_*`
 seams — a real detection backend and a real MemoryStore slot in behind them without changing the
 contract.
 
-> **Not yet tracer-validated.** memory-guard was out of the first tracer-bullet's scope (stateless
-> slice, tracer-bullet.md §6); the contract shapes get their own tracer once memory is in play.
+> **Contract tracer-validated (T6 / ADR-008).** memory-guard ran its own tracer-bullet: an
+> end-to-end slice drives `validate_write → validate_read → verify_delete` over the live `serve`
+> socket against the real `MemoryStore` seam, asserting each verb's response field-by-field on the
+> JSON decoded off the socket. The shapes validated **unchanged**. The detector dimension was
+> validated against the v0 `NativeDetector` (Presidio, T2, still pending) — a noted follow-up.
 
 ## v0-hardening increment (within-repo) — ✅ shipped (tasks 001–005)
 
@@ -54,9 +57,11 @@ The working v0 source was **not rewritten** — these extended it behind the con
 ## Toward a true v1 (substrate, not just tasks)
 
 The five tasks above hardened the **skeleton**; they did not replace the **stand-ins**. The repo flips
-from "v0 substrate" to a defensible **v1** only when the load-bearing stand-ins become real and the
-contract is tracer-validated. The gating item is the **contract tracer** (T6) — until it runs, the
-"not yet tracer-validated" caveat is correct and the headline stays v0. Ordered by dependency:
+from "v0 substrate" to a defensible **v1** when the load-bearing stand-ins become real and the
+contract is tracer-validated. The gating item — the **contract tracer** (T6) — has now **run**: the
+contract shapes are tracer-validated over the live socket against the real store (ADR-008), so the
+"not yet tracer-validated" caveat is removed. The one remaining open v1 dimension is the real
+detection backend (T2 / Presidio). Ordered by dependency:
 
 | # | Work | Unblocks / depends on | Status |
 |---|------|-----------------------|--------|
@@ -65,7 +70,7 @@ contract is tracer-validated. The gating item is the **contract tracer** (T6) �
 | T3 | **Residue proof across every index/copy** — extend the residue scan from "survivors in one map" to every backing index of the real store, plus the documented semantic-paraphrase miss-class. | **depends on T1** | 🔜 proposed |
 | T4 | **Identity-scoped read isolation (R1)** — enforce `identity` on `validate_read` so a writer's entries are readable only under a matching identity. | **depends on T1 + the identity-propagation contract** (agent-mesh already ships the verifiable SPIFFE principal; vault is not the source) | 🔜 startable — one interface decision (see R1) |
 | T5 | **audit-trail OCSF emission (R2)** — emit detections as OCSF events to `audit-trail` (soft runtime dep). | consume audit-trail's emit contract | 🔜 proposed |
-| T6 | **memory-guard's own tracer-bullet** — end-to-end slice with a real store + a real consumer that **validates the contract shapes**, promoting them from "not yet tracer-validated." May refine `validate_*`/`verify_delete`. **This is the task that earns the v1 label.** | **depends on T1, ideally T2** | 🔜 proposed |
+| T6 | **memory-guard's own tracer-bullet** — end-to-end slice over the live `serve` socket with a real store + a real consumer that **validated the contract shapes** field-by-field on the decoded socket response; shapes validated **unchanged** (no refinement forced). Detector dimension covered against the v0 `NativeDetector` (real-Presidio re-validation is a noted follow-up). Task 011 / [ADR-008](../architecture/decisions/008-contract-tracer-validation.md). **This is the task that earns the v1 label.** | **depends on T1, ideally T2** | ✅ tracer-validated (L6) |
 | T7 | **Fitness-function runner wired as a gate** — promote `docs/spec/fitness-functions.md` from `proposed` to enforced (latency budget, recall/precision floor, seam-isolation check) behind a `make check`/`make fitness` target. | — | 🔜 proposed |
 
 ## Remaining work — blocked / decisions needed

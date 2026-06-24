@@ -1,8 +1,12 @@
-# memory-guard contract (v0 shape — not yet tracer-validated)
+# memory-guard contract (tracer-validated)
 
-Mirrors `interface-contracts.md §2`. memory-guard was out of
-the first tracer-bullet's scope (stateless slice); it gets its own tracer when memory is in
-play, which may refine these shapes.
+Mirrors `interface-contracts.md §2`. These shapes are **tracer-validated**: memory-guard's own
+tracer-bullet (roadmap T6, [ADR-008](architecture/decisions/008-contract-tracer-validation.md))
+drives `validate_write → validate_read → verify_delete` over the live `serve` Unix socket against
+the real `MemoryStore` seam, asserting each verb's response field-by-field on the JSON decoded off
+the socket. The shapes below validated **unchanged** (no field renamed/added/dropped, no type
+changed). The detector dimension was validated against the v0 `NativeDetector`; a real-Presidio
+re-validation is a noted follow-up, and the shapes are detector-agnostic behind the `Detector` seam.
 
 - `validate_write(entry, identity) -> { allow, stored_id, flags }` — write-gate: reject
   suspected poisoning (fail-closed), redact PII, store, return flags.

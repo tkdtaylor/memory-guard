@@ -49,9 +49,13 @@ interface without changing the guard, the contract, or the IPC. The contract is
 Unix-socket IPC server. memory-guard is written in **Go** (single static binary, low per-call overhead
 on the memory hot path). **Apache-2.0.**
 
-> memory-guard was **out of the first tracer-bullet's scope** (the slice is stateless,
-> tracer-bullet.md §6). This v0 is a skeleton against the v0 contract shape and the contract gets its
-> own tracer once memory is in play — which may refine the shapes.
+> The contract is **tracer-validated**: memory-guard's own tracer-bullet (roadmap T6,
+> [ADR-008](../architecture/decisions/008-contract-tracer-validation.md)) drives
+> `validate_write → validate_read → verify_delete` over the live `serve` socket against the real
+> `MemoryStore` seam, asserting each verb's response field-by-field on the JSON decoded off the
+> socket. The shapes validated **unchanged**. The detector dimension was validated against the v0
+> `NativeDetector` (Presidio, task 007, is not yet merged); the shapes are detector-agnostic behind
+> the `Detector` seam, and a real-backend re-validation is a noted follow-up.
 
 ## Top-level invariants
 
