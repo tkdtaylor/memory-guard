@@ -82,8 +82,10 @@ the `validate_*` verbs are the **adapter seam**: the v0 store is an in-memory ma
 is regex, but any LangChain / LlamaIndex MemoryStore (behind the verbs) and any detection backend
 (behind `Detector`) can slot in without changing callers.
 
-> Note: these shapes are **v0 and not yet tracer-validated** — memory-guard was out of the first
-> tracer-bullet's scope (stateless slice). Its own tracer, run when memory is in play, may refine them.
+> Note (as of ADR-001): these shapes were **v0 and not yet tracer-validated** — memory-guard was out
+> of the first tracer-bullet's scope (stateless slice). **Superseded by
+> [ADR-008](008-contract-tracer-validation.md):** memory-guard's own tracer-bullet has since run at L6
+> against the live `serve` socket and the real `MemoryStore` seam — the shapes validated **unchanged**.
 
 ### 5. Post-deletion verification, not bare `delete()`
 

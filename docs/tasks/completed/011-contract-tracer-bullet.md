@@ -2,7 +2,7 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-24
-**Status:** backlog
+**Status:** completed (🟡 code merged — L6 live-socket evidence in ADR-008; pending spec-verifier before ✅). Detector dimension validated against the v0 `NativeDetector` (task 007 / Presidio not merged); real-backend re-validation is a noted follow-up.
 
 > **This is the task that earns the v1 label** (roadmap **T6**). memory-guard was **out of the first
 > tracer-bullet's scope** (the slice was stateless, tracer-bullet.md §6) — its contract gets its **own**
