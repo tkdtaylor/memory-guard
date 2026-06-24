@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 009 — typed identity + identity-scoped reads)
+**Last updated:** 2026-06-24 (task 010 — AuditSink seam + OCSF emission)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -64,10 +64,19 @@ in-guard SVID/X.509 verification (deferred behind the `Principal` seam).
 
 ## Outbound interfaces
 
-memory-guard makes **no outbound network calls** in v0. Detections are returned to the caller as
-`flags` in the response; emitting them as OCSF events to `audit-trail` is a **v1** integration (not
-wired). A Presidio-backed `Detector` (v1) would call out to a sidecar/subprocess or load an ONNX model
-— but that call would live **behind the `Detector` interface**, not as a contract-level outbound.
+memory-guard makes **no outbound network calls** in the default (disabled) configuration. When audit
+emission is **enabled** (via `AuditConfig.Enabled=true` + a non-nil `AuditSink`), memory-guard emits
+**OCSF-shaped events** for each detection to the configured `AuditSink` — the transport (Unix socket,
+HTTP, file) lives entirely in the `AuditSink` implementor, never in `guard.go` or `ipc.go`. See
+[B-009](behaviors.md#b-009) and [ADR-007](../architecture/decisions/007-audit-ocsf-emission.md).
+
+Emission is **default-DISABLED** (pending confirmation of the sibling audit-trail's emit endpoint),
+**best-effort** (fail-open — a down/slow/absent sink never blocks the hot path or changes a verdict),
+and **PII-safe** (no raw PII in any emitted event). The `AuditSink` seam (`audit.go`) is the extension
+point; swapping the transport is a one-implementation change with zero guard/IPC/contract impact.
+
+A Presidio-backed `Detector` (v1) would call out to a sidecar/subprocess or load an ONNX model —
+that call lives **behind the `Detector` interface**, not as a contract-level outbound.
 
 ---
 
@@ -143,16 +152,63 @@ func (p PreVerifiedPrincipal) Attested() bool
 
 ---
 
+### Type: `AuditSink` — the audit emission seam (ADR-007)
+
+```go
+type AuditSink interface {
+    Emit(event OCSFEvent) error  // send the OCSF event; error is swallowed by the guard (fail-open)
+}
+
+type AuditConfig struct {
+    Enabled bool      // default false (disabled); must be true for any emission
+    Sink    AuditSink // nil with Enabled==true → fails closed to disabled (no emission)
+}
+
+func (g *MemoryGuard) WithAudit(cfg AuditConfig) *MemoryGuard  // builder: injects the sink; returns a new guard
+
+// Provided implementations:
+type NoOpSink struct{}        // zero-cost no-op (default when disabled)
+type CollectingSink struct{}  // thread-safe in-memory capture for tests
+type FailingSink struct{}     // always returns error (proves fail-open in tests)
+type PanicSink struct{}       // always panics (proves recover() wrapper in tests)
+type SlowSink struct{}        // blocks per Emit (proves AsyncSink keeps the hot path unstalled)
+type ChannelSink struct{}     // non-blocking buffered channel for optional async delivery
+
+// Non-blocking dispatch wrapper for slow real transports (ADR-007 §6):
+func NewAsyncSink(inner AuditSink, n int) *AsyncSink  // wraps inner; Emit enqueues + returns; drain goroutine forwards
+func (s *AsyncSink) Emit(event OCSFEvent) error        // non-blocking; drops on full buffer (fail-open)
+func (s *AsyncSink) Close()                            // stops the drain goroutine (idempotent)
+```
+
+- The `AuditSink` is the **third pluggable seam** (alongside `Detector` and `MemoryStore`). The
+  transport (Unix socket / HTTP / file) lives in the implementor; nothing transport-specific enters
+  `guard.go`, `ipc.go`, or the contract.
+- `(*MemoryGuard).WithAudit` is the **single injection point**. The fitness seam check
+  (`TestFitnessSeam`) continues to pass after this change — `audit` is an interface field, not a
+  transport token.
+- A **slow/blocking** transport must be wrapped in `AsyncSink` (non-blocking dispatch — enqueue +
+  background drain + drop-on-full) so the hot path never stalls (REQ-005 / ADR-007 §6). The
+  synchronous in-process sinks (`CollectingSink`, `NoOpSink`) stay synchronous.
+- Emission is always **fail-open** (via `emitSafe`): errors swallowed, panics recovered, nil = no-op.
+- The OCSF event shape is defined in `audit.go` (`OCSFEvent` / `OCSFFinding`); see ADR-007 for the
+  shape rationale and the documented assumption about the public OCSF schema.
+
+---
+
 ## Extension points
 
-The single extension point is the **`Detector` interface** (`detector.go`). A new detection backend is
-adopted by implementing `Detector` and passing it to `NewMemoryGuard`, **never** by changing the guard,
-the IPC, or the wire contract. Two implementations ship: `RegexDetector` (v0 stand-in / parity baseline)
-and `NativeDetector` (the v1 production backend — Go-native, in-process, zero new dependencies; the
-CLI / `serve` default). The backend-choice decision (deployment shape + hot-path latency budget) was
-settled by the memory-guard tracer in **ADR-002** (in-process, ~5.6 µs detection cost per `validate_*`
-op); a Presidio-backed detector (sidecar / ONNX) is deferred but still slots in additively behind this
-same seam. There is no plugin registry in v0; extension is by source modification behind the seam. The
-in-memory `store` is the secondary (v1) seam where a real MemoryStore backend slots in behind the
-`validate_*` verbs.
+Three extension points exist, all seams behind stable interfaces:
+
+1. **`Detector` interface** (`detector.go`) — the detection backend (PII + injection). Two
+   implementations ship: `RegexDetector` (v0 stand-in) and `NativeDetector` (Go-native in-process,
+   ADR-002; the CLI/serve default). A Presidio-backed detector slots in additively behind this seam.
+2. **`MemoryStore` interface** (`store.go`) — the backing store. Two adapters ship: `InMemoryStore`
+   (the default single-map v0 backing) and `TwoIndexStore` (primary + secondary-content-index,
+   ADR-005). A real MemoryStore (LangChain / vector store / SQLite) slots in behind this seam.
+3. **`AuditSink` interface** (`audit.go`) — the audit emission transport. Ships with a no-op default
+   and test fakes; a real Unix-socket / HTTP / file transport slots in additively behind this seam
+   once the audit-trail emit endpoint is confirmed (ADR-007).
+
+There is no plugin registry; extension is by source modification behind each seam. A new implementation
+of any seam requires zero changes to `guard.go`, `ipc.go`, `main.go`, or the wire contract.
 </content>

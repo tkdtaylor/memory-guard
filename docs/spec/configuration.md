@@ -1,7 +1,7 @@
 # Configuration
 
 **Project:** memory-guard
-**Last updated:** 2026-06-19
+**Last updated:** 2026-06-24 (task 010 — AuditConfig)
 
 Every knob the system exposes. memory-guard is configured by **command-line flags** only — there are
 no config files, no application environment variables, and no secrets in v0.
@@ -79,10 +79,30 @@ repo.
 
 ---
 
+## Audit emission configuration
+
+Audit emission is controlled **programmatically** (not via CLI flags or env vars in v0) through the
+`AuditConfig` struct injected via `(*MemoryGuard).WithAudit`. This is a code-level knob, not an
+operator-visible flag — the operator wires the config at construction time (`main.go` / `ipc.go`).
+
+| Field | Type | Default | Effect |
+|-------|------|---------|--------|
+| `AuditConfig.Enabled` | bool | `false` | `false` → emission disabled (default until audit-trail endpoint confirmed). `true` enables emission only when `Sink` is also non-nil |
+| `AuditConfig.Sink` | `AuditSink` | `nil` | The transport implementation (socket/HTTP/file). `nil` with `Enabled=true` fails closed to disabled (no emission, no crash) |
+
+**Default:** emission is **disabled** (`AuditConfig{}` zero value). The guard ships with emission off
+until the sibling audit-trail emit endpoint is confirmed live (ADR-007).
+
+**Invalid config** (`Enabled=true, Sink=nil`): fails closed to disabled — no emission, no crash. This
+is the documented safe degradation for a misconfigured sink.
+
+---
+
 ## Defaults policy
 
 Defaults are **safe / fail-closed**: the write-gate rejects suspected poisoning by default (a write is
 suspect until it passes detection); PII is redacted by default on both write and read; `--socket` has
-no default (the operator must name it explicitly rather than risk binding a surprise path). No path
+no default (the operator must name it explicitly rather than risk binding a surprise path); audit
+emission is **disabled by default** (fail-open for the sink, fail-closed for the write-gate). No path
 stores poisoned content or returns raw PII.
 </content>

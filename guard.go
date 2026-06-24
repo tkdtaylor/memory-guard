@@ -19,10 +19,16 @@ import (
 // The PII/injection detection lives behind the Detector seam (detector.go). The value-add
 // the block OWNS is here: the write-gate (fail-closed on suspected poisoning) and
 // post-deletion verification (prove an entry is actually gone — the industry gap).
+//
+// Audit emission (task 010 / ADR-007) is additive: every detection the guard already computes
+// is ALSO emitted as an OCSF event through the AuditSink seam (audit.go). Emission is
+// BEST-EFFORT and FAIL-OPEN — a down sink never blocks this path and never changes a verdict.
+// The audit field is nil when emission is disabled (the default).
 type MemoryGuard struct {
 	mu    sync.Mutex
 	det   Detector
 	store MemoryStore
+	audit AuditSink // nil = emission disabled (default); non-nil = emit on each detection
 }
 
 type entry struct {
@@ -45,6 +51,9 @@ type entry struct {
 // compiling unmodified; pass exactly one store to swap the backing (the one-line change
 // that proves the seam, e.g. NewMemoryGuard(det, someStore) where someStore is any
 // MemoryStore implementation — the concrete backings live behind the seam in store.go).
+//
+// Audit emission (task 010): pass a non-nil AuditConfig to enable OCSF event emission.
+// The zero-value (disabled) config is the default — call WithAudit to enable.
 func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard {
 	if det == nil {
 		det = NewRegexDetector()
@@ -57,6 +66,18 @@ func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard {
 		s = NewInMemoryStore()
 	}
 	return &MemoryGuard{det: det, store: s}
+}
+
+// WithAudit returns a copy of the guard with the given AuditSink wired in (immutable
+// builder-style). An invalid config (nil sink, disabled) safely wires in nil (no emission).
+// The original guard is unchanged. This is the injection point the tests use to swap sinks
+// without rebuilding the guard from scratch.
+func (g *MemoryGuard) WithAudit(cfg AuditConfig) *MemoryGuard {
+	var sink AuditSink
+	if cfg.isActive() {
+		sink = cfg.Sink
+	}
+	return &MemoryGuard{det: g.det, store: g.store, audit: sink}
 }
 
 // ValidateWrite is the write-gate: flag poisoning (fail-closed), redact PII, then store.
@@ -73,7 +94,10 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 	flags = append(flags, piiFlags...)
 
 	if contains(flags, "injection_suspected") {
-		// fail-closed on suspected context poisoning: do not store
+		// fail-closed on suspected context poisoning: do not store.
+		// Emit the injection-rejection event AFTER the verdict is computed — the sink
+		// failure never changes the verdict (fail-open for the sink, fail-closed for the gate).
+		emitSafe(g.audit, BuildInjectionRejectedEvent(flags))
 		return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
 	}
 	boundKey := boundKeyFor(principalFromMap(identity)) // producer: the identity bound at write
@@ -81,6 +105,15 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 	id := "mem-" + randHex(6)
 	g.store.Put(id, entry{content: redacted, boundIdentity: boundKey, flags: flags})
 	g.mu.Unlock()
+
+	// Emit a PII-redaction event only when PII was actually found (non-empty piiFlags).
+	// A benign write with no flags emits nothing (no fabricated event — deterministic).
+	// The event is built from the already-computed flags and the opaque stored_id only:
+	// the raw text and the redacted content NEVER enter the event (REQ-004).
+	if len(piiFlags) > 0 {
+		emitSafe(g.audit, BuildPIIRedactionEvent(flags, id))
+	}
+
 	return map[string]any{"allow": true, "stored_id": id, "flags": flagsOrEmpty(flags)}
 }
 
@@ -139,22 +172,33 @@ func (g *MemoryGuard) VerifyDelete(id string) map[string]any {
 	g.store.Delete(id)
 	_, stillPresent := g.store.Get(id)
 
+	hash := deletionHash(id, deleted.content)
 	out := map[string]any{
 		"confirmed":        !stillPresent,
 		"residue_detected": false,
-		"deletion_hash":    deletionHash(id, deleted.content),
+		"deletion_hash":    hash,
 	}
 
 	// Residue is only meaningful for content that actually existed and was removed. Scanning the
 	// SURVIVORS across EVERY backing index/copy (the store after delete, via AllByIndex()) means a
 	// deleted entry can never flag itself (no self-residue false positive — the truth-table edge
 	// case), and a residue surviving only in a secondary index is caught and NAMED (task 008).
+	residueDetected := false
+	var residueFlags []string
 	if existed {
 		if detected, summary := residueScanIndexes(deleted.content, g.store.AllByIndex()); detected {
 			out["residue_detected"] = true
 			out["residue_summary"] = summary
+			residueDetected = true
+			residueFlags = []string{"residue_detected"}
 		}
 	}
+
+	// Emit a deletion/residue event AFTER the verdict map is fully computed.
+	// The event carries ONLY the deletion_hash (audit linkage) and the residue flag —
+	// NEVER the raw deleted content (REQ-004). A failing sink NEVER changes the verdict.
+	emitSafe(g.audit, BuildDeletionEvent(hash, residueDetected, residueFlags))
+
 	return out
 }
 

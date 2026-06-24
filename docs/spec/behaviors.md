@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 009 — identity-scoped read isolation)
+**Last updated:** 2026-06-24 (task 010 — audit-trail OCSF emission)
 
 What the system does, observably — triggering condition, response, externally-visible side effects,
 failure modes. The "you can verify this from outside the process" view.
@@ -190,12 +190,64 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   pre-verified `trust_tier` across the `0600` socket (ADR-004) and keeps SPIFFE/X.509 specifics behind
   the `Principal` seam.
 
+### B-009: Audit-trail OCSF emission — fail-open, config-gated, default-disabled (task 010 / ADR-007)
+
+- **Trigger:** any detection that `ValidateWrite` or `VerifyDelete` computes — PII redaction, injection
+  rejection, residue found, or deletion — when audit emission is enabled in the `AuditConfig` and a
+  non-nil `AuditSink` is wired in.
+- **Response:** the guard emits an **OCSF-shaped event** through the `AuditSink` seam (`audit.go`) for
+  each detection, **in addition to** returning the verdict and `flags` to the caller (additive — the
+  contract response shapes are unchanged). Events carry the **OCSF Security Finding envelope**
+  (`class_uid=2001`, `category_uid=2`, `activity_id=1`, `severity_id` by detection class, a UTC
+  `time` timestamp, and a `metadata.product.name="memory-guard"` block) plus a structured `finding`
+  block (`type`, `operation`, `flags`, `flag_count`, `stored_id`, `deletion_hash`, `residue_detected`).
+  Detection detail is in **structured fields, never a free-text blob** (REQ-002). Severity:
+  `injection_rejected` → High (4); `pii_redaction` → Low (2); `residue_found` → Medium (3);
+  `deletion_verified` → Informational (1). A benign write with no detection flags emits no event
+  (deterministic).
+- **Emission policy:** emission is **best-effort and fail-open**. A failing, slow, or absent sink
+  **never** blocks the hot path, **never** surfaces an error to the caller, and **never** changes a
+  `validate_*` / `verify_delete` verdict. `emitSafe` (the only call site in the guard) swallows
+  errors and recovers panics. The write-gate's **fail-closed** posture is completely independent of
+  the sink's fail-open posture: a poisoned write stays rejected even when the sink is down.
+- **PII invariant:** no raw PII or raw deleted content ever appears in an emitted event. Events carry
+  the guard-computed flag metadata (`"pii:EMAIL"`, `"injection_suspected"`) and the opaque `stored_id`
+  / deterministic `deletion_hash` — **never** the raw input text. The memory-guard invariant "PII
+  never lands anywhere unredacted" extends to the audit channel.
+- **Config gate:** emission is controlled by `AuditConfig{Enabled, Sink}` injected via
+  `(*MemoryGuard).WithAudit`. **Default: DISABLED** (pending confirmation of the audit-trail emit
+  endpoint — ADR-007). An invalid config (`Enabled: true, Sink: nil`) fails closed to disabled.
+  Toggling emission requires reconstructing the guard with a new `WithAudit` call; no live config
+  reload in v0.
+- **OCSF event shape note:** the event shape is modelled on the **public OCSF 1.1 standard** as a
+  documented assumption. The sibling audit-trail's exact consumed contract has not been confirmed live
+  (ADR-007). When confirmed, the shape is reconciled in `audit.go`'s event constructors — zero
+  guard/IPC/contract impact.
+- **Side effects:** each call to `emitSafe` is a synchronous call to `Sink.Emit`; the default
+  `NoOpSink` has zero allocation cost. A real transport (socket/HTTP/file) would add round-trip
+  latency only when enabled — not on the default disabled path.
+- **Failure modes:** a nil or missing sink is silently treated as disabled. A panicking `Emit`
+  implementation is recovered (the guard continues). A **slow/blocking** sink must be wrapped in
+  `AsyncSink` (the non-blocking dispatch wrapper — bounded buffered channel + background drain
+  goroutine + drop-on-full + panic recovery in the drain) so the hot path never stalls waiting for a
+  slow transport: `AsyncSink.Emit` enqueues and returns immediately, and the slow forward happens off
+  the hot path; when the buffer is full the event is dropped (fail-open). Real network transports
+  (Unix socket / HTTP) are intended to be wired through `AsyncSink`; the synchronous in-process sinks
+  (`CollectingSink`, `NoOpSink`) stay synchronous. *(Tests: `TestAuditTC001_EventPerDetectionClass`
+  through `TestAuditTC007_ConfigGated`, including `TestAuditTC005_NoPIIInEvents` — the load-bearing
+  no-raw-PII assertion — `TestAuditTC006_FailOpen` (fail-open + panic-recovery +
+  `slow_sink_does_not_stall_hot_path`), `TestAsyncSinkNonBlocking`, and
+  `TestDeletionHashIndependentOfSinkState`.)*
+
+---
+
 > **v0 scope note.** The store is an in-memory map and the detector is regex; reads are now
 > **identity-scoped** (ADR-004 / task 009 — a writer's entries are returned only under a matching
 > attested identity, with an unbound-only fallback), via a **linear identity filter** (the durable form
 > is a per-identity index behind the `MemoryStore` seam — deferred). Identity is **pre-verified
 > upstream** (agent-mesh); in-guard SVID verification (`SvidVerifyingPrincipal`) is deferred behind the
-> `Principal` seam. Detections are not yet emitted to `audit-trail`. These are stated facts about v0,
-> tracked as limitations in [SPEC.md](SPEC.md) and [fitness-functions.md](fitness-functions.md), not
-> behaviors to rely on as final.
+> `Principal` seam. Audit emission is **wired but default-disabled** (ADR-007 — pending confirmation of
+> the audit-trail emit endpoint; the event shape is pinned to public OCSF 1.1, pending live alignment).
+> These are stated facts about v0, tracked as limitations in [SPEC.md](SPEC.md) and
+> [fitness-functions.md](fitness-functions.md), not behaviors to rely on as final.
 </content>
