@@ -35,7 +35,7 @@ remains (vault dropped as a dependency).
 | 009 | Identity-scoped read isolation (T4 / R1) | `009-identity-scoped-read-isolation-test-spec.md` | TC-001…TC-007 | ❌ | 006 + identity-propagation contract (agent-mesh already ships the SVID; vault dropped) |
 | 010 | audit-trail OCSF emission (T5 / R2) | `010-audit-trail-emission-test-spec.md` | TC-001…TC-007 | ❌ | audit-trail emit contract; seq. after 007 |
 | 011 | Contract tracer-bullet — **earns the v1 label** (T6) | `011-contract-tracer-bullet-test-spec.md` | TC-001…TC-006 | ❌ | **006** (ideally 007) |
-| 012 | Fitness-function runner wired as a gate (T7) | `012-fitness-function-runner-test-spec.md` | TC-001…TC-008 | ❌ | — |
+| 012 | Fitness-function runner wired as a gate (T7) | `012-fitness-function-runner-test-spec.md` | TC-001…TC-008 | 🟡 | L3: `make fitness` → `All fitness checks passed.` + each synthetic breach exits non-zero with measured-vs-threshold delta. L2: `go test ./...` → `ok github.com/tkdtaylor/memory-guard`. |
 
 ## Status key
 
