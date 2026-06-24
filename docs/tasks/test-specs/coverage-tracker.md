@@ -18,6 +18,22 @@
 | 004 | PII recognizer coverage hardening (behind the Detector seam) | `004-pii-recognizer-coverage-test-spec.md` | TC-001…TC-005 | ✅ | spec-verifier APPROVE (all 5 TCs ✓; seam invariant held — only detector.go + tests + data-model.md changed). L5: `go test -v -run TestCorpusSummary ./...` → 9 categories, recall=1.00/category, precision=1.00 (0 FP / 9 hard negatives) for both RegexDetector and NativeDetector. L2: `go test -count=1 ./...` → `ok github.com/tkdtaylor/memory-guard 0.570s`. guard.go/ipc.go/main.go/CONTRACT.md untouched. Note: spec's `1.2.3.4` hard-negative is itself a valid IP; substituted `v1.2.3` and documented in data-model.md. |
 | 005 | Publish / remote follow-up (git remote + push) | `005-publish-remote-followup-test-spec.md` | TC-001…TC-003 | ✅ | **L6 — operator-observed.** Operator confirmed visibility **private** + owner `tkdtaylor` (TC-001). Remote created `gh repo create tkdtaylor/memory-guard --private` and `main` pushed; `gh repo view` → visibility PRIVATE, default branch `main`; local HEAD == remote HEAD (TC-002). Adoption package present on the remote: LICENSE, NOTICE, CONTRIBUTING.md (DCO), `.github/FUNDING.yml`, `.github/workflows/dco.yml` (TC-003). All 10 first-party `.go` files carry the SPDX header; `go build ./...` clean (TC-004). TODO.md "Publish" marked done with the URL + private visibility (TC-005). URL: https://github.com/tkdtaylor/memory-guard |
 
+## Backlog — true-v1 increment (roadmap "Toward a true v1")
+
+Scaffolded 2026-06-24; specs written, **not yet started** (status ❌, except 009 which is ⚠️ blocked).
+These flip to 🟡/✅ only after a task branch implements + verifies them. The gating task for the v1
+label is **011** (contract tracer) — it depends on **006**.
+
+| Task ID | Feature (roadmap) | Spec file | Tests written | Status | Depends on |
+|---------|-------------------|-----------|---------------|--------|------------|
+| 006 | MemoryStore seam + one real adapter (T1) | `006-memorystore-seam-test-spec.md` | TC-001…TC-006 | ❌ | — (foundational; unblocks 008, 011) |
+| 007 | Presidio-backed `Detector` (T2) | `007-presidio-detector-backend-test-spec.md` | TC-001…TC-007 | ❌ | ask-first ADR + dep-scan gate |
+| 008 | Residue proof across every index/copy (T3) | `008-residue-across-indexes-test-spec.md` | TC-001…TC-008 | ❌ | **006** |
+| 009 | Identity-scoped read isolation (T4 / R1) | `009-identity-scoped-read-isolation-test-spec.md` | TC-001…TC-007 | ⚠️ | external identity (agent-mesh/vault) + 006 |
+| 010 | audit-trail OCSF emission (T5 / R2) | `010-audit-trail-emission-test-spec.md` | TC-001…TC-007 | ❌ | audit-trail emit contract; seq. after 007 |
+| 011 | Contract tracer-bullet — **earns the v1 label** (T6) | `011-contract-tracer-bullet-test-spec.md` | TC-001…TC-006 | ❌ | **006** (ideally 007) |
+| 012 | Fitness-function runner wired as a gate (T7) | `012-fitness-function-runner-test-spec.md` | TC-001…TC-008 | ❌ | — |
+
 ## Status key
 
 | Symbol | Meaning |
