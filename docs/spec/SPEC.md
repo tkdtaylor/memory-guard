@@ -104,8 +104,10 @@ in `docs/plans/` / `docs/tasks/`):
   seam.
 - **No adversarial poisoning test-suite.** The v0 injection detector is regex-based; the
   MINJA-/GRAGPoison-class adversarial suite the write-gate is measured against is v1.
-- **No audit-trail emission.** Detections are returned as `flags` but not yet emitted as OCSF events to
-  `audit-trail`.
+- **Audit emission is wired but default-disabled.** The `AuditSink` seam (`audit.go`) is wired and
+  the OCSF event shape is modelled on the public OCSF 1.1 standard (ADR-007). Emission is **default-
+  disabled** pending confirmation of the sibling audit-trail's emit endpoint; once confirmed, wiring a
+  real `AuditSink` is a one-implementation change with zero guard/IPC/contract impact.
 - **Not the tool-call / web-ingestion guard.** That boundary is `armor`'s (ASI01); memory-guard gates
   what gets **stored** (ASI06).
 </content>
