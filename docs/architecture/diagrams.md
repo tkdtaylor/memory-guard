@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-06-24 (task 009 — identity-scoped reads: typed `{spiffe_id, trust_tier}` principal bound at write, exact-match filter at read, unbound-only fallback; ADR-004)
+**Last updated:** 2026-06-24 (task 007 — Presidio detector backend as an opt-in out-of-process Python sidecar behind the unchanged `Detector` seam; composite native-structured + Presidio NER; injection unchanged; ADR-009)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -61,8 +61,10 @@ C4Component
         Component(ipc, "IPC server", "ipc.go", "serve: remove stale socket, bind 0600 Unix socket, frame newline-delimited JSON, dispatch validate_write/validate_read/verify_delete/ping over a shared *MemoryGuard; structured error shape {error:{code,message,retryable}}")
         Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store.Put), ValidateRead (store.Scan → RedactPII), VerifyDelete (store.Delete → re-check absence via store.Get → scan store.AllByIndex() survivors across EVERY backing index/copy for residue, ADR-003/ADR-006: tiered normalized substring/phrase/token-overlap + number-word canonicalization, stdlib-only, returns confirmed/residue_detected/residue_summary? naming the index/deletion_hash)); talks to the store ONLY through the MemoryStore seam behind a sync.Mutex; mints opaque stored_id from crypto/rand")
         Component(store, "MemoryStore seam", "store.go", "MemoryStore interface (Put / Get / Delete / Scan / All / AllByIndex) + two stdlib backings: InMemoryStore (the default single map[string]entry; AllByIndex exposes one \"primary\" index) and TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both; AllByIndex names each). The boundary that isolates the storage backend; ADR-005/ADR-006")
-        Component(detector, "Detector seam", "detector.go", "Detector interface (RedactPII / DetectInjection) + the v0 RegexDetector (Presidio stand-in): EMAIL/US_SSN/CREDIT_CARD/API_KEY recognizers; ignore/disregard-instructions, system-prompt, <system>/<instructions> injection patterns. The boundary that isolates the detection backend")
+        Component(detector, "Detector seam", "detector.go / detector_config.go / detector_presidio.go", "Detector interface (RedactPII / DetectInjection) + 3 backends via NewDetectorFromConfig (MEMGUARD_DETECTOR): RegexDetector, Go-native NativeDetector (default, ADR-002), opt-in PresidioDetector (ADR-009: composite native-structured + Presidio NER, injection delegated to native UNCHANGED). The boundary that isolates the detection backend — no backend type leaks past it")
     }
+
+    System_Ext(presidio, "Presidio sidecar", "presidio/sidecar.py — out-of-process Python: spaCy NER + Presidio recognizers (warm process); analyze JSON over stdin/stdout; NO runtime network; pinned base-only deps. Opt-in (MEMGUARD_DETECTOR=presidio)")
 
     Rel(agent, ipc, "validate_write / validate_read / verify_delete", "JSON / Unix socket")
     Rel(operator, main, "serve / write / read", "CLI")
@@ -70,6 +72,7 @@ C4Component
     Rel(main, guard, "write/read demos call ValidateWrite/ValidateRead in-process")
     Rel(ipc, guard, "dispatch op → ValidateWrite / ValidateRead / VerifyDelete")
     Rel(guard, detector, "DetectInjection (before store) + RedactPII (before store & on read)")
+    Rel(detector, presidio, "analyze (only when MEMGUARD_DETECTOR=presidio)", "JSON / subprocess stdio")
     Rel(guard, store, "Put / Get / Delete / Scan / All (only string/entry/[]entry cross the seam)")
 ```
 
@@ -79,7 +82,10 @@ C4Component
 > multi-index, persistent, or third-party store **behind the `MemoryStore` interface**. In both cases
 > `MemoryGuard`, `ipc.go`, and the contract do not change — only `string` / `entry` / `[]entry` cross
 > the storage seam, only `string` / `[]string` cross the detection seam. The detector deployment shape
-> and the hot-path latency budget are deferred to the memory-guard tracer.
+> is **resolved** (ADR-009): the opt-in Presidio backend is an **out-of-process Python sidecar**, so the
+> Go binary stays pure-Go / stdlib-only; the Go-native `NativeDetector` remains the `< 1 ms` hot-path
+> default, and the Presidio sidecar is the opt-in rich-NER backend (~ms/op, revised budget). ONNX-in-
+> process stays deferred behind the same seam.
 
 **Key contracts**
 - `validate_write(entry, identity) -> { allow, stored_id, flags }` — the **write-gate**:

@@ -26,6 +26,29 @@ import (
 	"os"
 )
 
+// detectorBackend returns the configured detection backend NAME, defaulting to the Go-native
+// backend (ADR-002). Selection is via the MEMGUARD_DETECTOR env var ("regex" | "native" |
+// "presidio"); the actual backend object is built by the generic NewDetectorFromConfig factory
+// (detector_config.go) so this file names only a backend STRING — no backend Go type appears
+// here, keeping the seam-isolation gate clean.
+func detectorBackend() string {
+	if b := os.Getenv("MEMGUARD_DETECTOR"); b != "" {
+		return b
+	}
+	return BackendNative
+}
+
+// buildDetector constructs the configured backend behind the seam, exiting with a clear error
+// on an unknown backend name (fail-closed — never a silent fallback that hides a typo).
+func buildDetector() Detector {
+	det, err := NewDetectorFromConfig(detectorBackend())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "detector:", err)
+		os.Exit(2)
+	}
+	return det
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: memory-guard <serve|write|read> …")
@@ -40,16 +63,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "serve: --socket is required")
 			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "memory-guard serving on %s\n", *socket)
-		if err := serve(*socket, NewMemoryGuard(NewNativeDetector())); err != nil {
+		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s)\n", *socket, detectorBackend())
+		if err := serve(*socket, NewMemoryGuard(buildDetector())); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
 	case "write":
-		g := NewMemoryGuard(NewNativeDetector())
+		g := NewMemoryGuard(buildDetector())
 		printJSON(g.ValidateWrite(arg(2), nil))
 	case "read":
-		g := NewMemoryGuard(NewNativeDetector())
+		g := NewMemoryGuard(buildDetector())
 		g.ValidateWrite(arg(2), nil) // seed so the one-shot demo has something to read
 		printJSON(g.ValidateRead(arg(2), nil))
 	default:

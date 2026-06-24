@@ -1,7 +1,7 @@
 # Configuration
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 010 — AuditConfig)
+**Last updated:** 2026-06-24 (task 007 — Presidio detector backend selection + pinned sidecar deps)
 
 Every knob the system exposes. memory-guard is configured by **command-line flags** only — there are
 no config files, no application environment variables, and no secrets in v0.
@@ -41,11 +41,47 @@ tracked as a limitation rather than a config knob.
 
 ## Environment variables
 
-**Application:** none. memory-guard reads no application environment variables in v0.
+**Application:**
+
+| Variable | Values | Default | Effect |
+|----------|--------|---------|--------|
+| `MEMGUARD_DETECTOR` | `regex` \| `native` \| `presidio` | `native` | Selects the `Detector` backend at construction (`main.go` → `NewDetectorFromConfig`). `native` (default) = the Go-native in-process backend (ADR-002, `< 1 ms` hot path). `regex` = the v0 RegexDetector. `presidio` = the opt-in Presidio-backed sidecar (ADR-009, milliseconds/op, richer PII/NER recall). An unknown value is a fail-closed construction error, exit `2` — never a silent fallback. The value names a backend STRING only; no backend Go type leaks into the seam-protected files. |
 
 **Hook profile env vars** (consumed by `.claude/scripts/`, not the application):
 - `CLAUDE_HOOK_PROFILE` — `minimal` / `standard` / `strict` (default `standard`)
 - `CLAUDE_DISABLED_HOOKS` — comma-separated list of hook names to disable
+
+---
+
+## Presidio detector backend (opt-in, ADR-009)
+
+Selected by `MEMGUARD_DETECTOR=presidio`. The Go binary stays **pure-Go / stdlib-only** (`go.mod`
+remains `require`-free); the Presidio dependency runs **out-of-process** as a Python **sidecar**
+(`presidio/sidecar.py`), spoken to over newline-delimited JSON on the subprocess's stdin/stdout. The
+sidecar needs **no outbound network at runtime** (the spaCy model is local and pinned).
+
+**Pinned, BASE-ONLY dependency set** (`presidio/requirements.txt`):
+
+| Package | Pinned version | Notes |
+|---------|----------------|-------|
+| `presidio-analyzer` | `2.2.362` | base install only — NO azure/openai/transformers/gliner/stanza extras |
+| `presidio-anonymizer` | `2.2.362` | base install only |
+| `spacy` | `3.8.14` | NER engine |
+| `en_core_web_lg` | `3.8.0` | spaCy model — installed via `python -m spacy download en_core_web_lg` |
+
+**Provisioning:** `python3 -m pip install -r presidio/requirements.txt && python3 -m spacy download en_core_web_lg`.
+
+**Why base-only:** the dependency scan flagged credential-reading code as living **only** in the
+optional extras (azure / openai / langextract / transformers / gliner / stanza); a base install never
+pulls them. **DO NOT** add those extras — they reintroduce that surface. `dep-scan` over the pinned
+packages: all security checks pass (install_scripts / obfuscation / vulnerability / typosquatting /
+maintainer_change / dependency_confusion), with one informational `pypi_provenance` WARN accepted by
+operator decision (pip hash-pinning mitigates the sole-source-of-integrity note). See ADR-009.
+
+**Fail-closed degradation:** if the sidecar is unavailable (not provisioned, crashed), the Presidio
+backend falls back to native structured redaction — PII is **still redacted, never passed through
+raw** — and surfaces no Presidio-typed error past the seam. The `native` default backend has no such
+dependency and is unaffected.
 
 ---
 
@@ -75,7 +111,8 @@ repo.
 | Socket | Unix domain socket at `--socket` path | `chmod 0600`; co-located with the agent, not network-exposed; no `SO_PEERCRED` gate in v0 |
 | Ports exposed | none | memory-guard binds no TCP port; IPC is the Unix socket only |
 | On-disk store | none | the store is in-memory only; nothing persists across a restart |
-| Runtime dependencies | **none (Go standard library only)** | no third-party modules in v0; the first will be the Presidio-backed `Detector` (sidecar / ONNX), a future ADR + `dep-scan` / `code-scanner` blocking gate |
+| Runtime dependencies (Go) | **none (Go standard library only)** | `go.mod` stays `require`-free; the Presidio backend (ADR-009) adds NO Go dependency — its third-party surface is the out-of-process Python sidecar |
+| Runtime dependencies (Presidio sidecar, opt-in) | **pinned, base-only Python** (`presidio-analyzer`/`presidio-anonymizer` 2.2.362, spacy 3.8.14, en_core_web_lg 3.8.0) | only when `MEMGUARD_DETECTOR=presidio`; cleared `dep-scan` (all security checks pass, informational provenance WARN accepted); see ADR-009 + the Presidio section above |
 
 ---
 
