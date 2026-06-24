@@ -2,7 +2,7 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-24
-**Status:** backlog
+**Status:** completed (🟡 code merged — pending spec-verifier + L5/L6 promotion to ✅)
 
 > The single in-memory `map` in `guard.go` is the load-bearing **stand-in** that keeps the headline at
 > "v0 substrate." It is *why* delete-proof (T3) and identity isolation (T4) can't be real — you cannot

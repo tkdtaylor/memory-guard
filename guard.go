@@ -22,7 +22,7 @@ import (
 type MemoryGuard struct {
 	mu    sync.Mutex
 	det   Detector
-	store map[string]entry
+	store MemoryStore
 }
 
 type entry struct {
@@ -31,11 +31,26 @@ type entry struct {
 	flags    []string
 }
 
-func NewMemoryGuard(det Detector) *MemoryGuard {
+// NewMemoryGuard wires the guard with a Detector and (optionally) a MemoryStore. Both
+// dependencies are pluggable seams: a nil Detector falls back to the v0 RegexDetector,
+// and an omitted (or nil) store falls back to the default InMemoryStore — so the CLI /
+// serve defaults are unchanged from v0. The store argument is variadic purely to keep
+// the v0 single-argument call sites (NewMemoryGuard(nil), NewMemoryGuard(det))
+// compiling unmodified; pass exactly one store to swap the backing (the one-line change
+// that proves the seam, e.g. NewMemoryGuard(det, someStore) where someStore is any
+// MemoryStore implementation — the concrete backings live behind the seam in store.go).
+func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard {
 	if det == nil {
 		det = NewRegexDetector()
 	}
-	return &MemoryGuard{det: det, store: map[string]entry{}}
+	var s MemoryStore
+	if len(store) > 0 {
+		s = store[0]
+	}
+	if s == nil {
+		s = NewInMemoryStore()
+	}
+	return &MemoryGuard{det: det, store: s}
 }
 
 // ValidateWrite is the write-gate: flag poisoning (fail-closed), redact PII, then store.
@@ -50,7 +65,7 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 	}
 	g.mu.Lock()
 	id := "mem-" + randHex(6)
-	g.store[id] = entry{content: redacted, identity: identity, flags: flags}
+	g.store.Put(id, entry{content: redacted, identity: identity, flags: flags})
 	g.mu.Unlock()
 	return map[string]any{"allow": true, "stored_id": id, "flags": flagsOrEmpty(flags)}
 }
@@ -59,10 +74,8 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any {
 	g.mu.Lock()
 	var hits []string
-	for _, e := range g.store {
-		if strings.Contains(e.content, query) {
-			hits = append(hits, e.content)
-		}
+	for _, e := range g.store.Scan(query) {
+		hits = append(hits, e.content)
 	}
 	g.mu.Unlock()
 	redacted, flags := g.det.RedactPII(strings.Join(hits, "\n"))
@@ -87,9 +100,12 @@ func (g *MemoryGuard) VerifyDelete(id string) map[string]any {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	deleted, existed := g.store[id]
-	delete(g.store, id)
-	_, stillPresent := g.store[id]
+	// Read the entry (and whether it existed) BEFORE deleting so the residue scan has the
+	// deleted content, then prove absence with a FRESH post-delete Get — not the Delete
+	// return value (the industry gap: a bare delete() that is never re-checked).
+	deleted, existed := g.store.Get(id)
+	g.store.Delete(id)
+	_, stillPresent := g.store.Get(id)
 
 	out := map[string]any{
 		"confirmed":        !stillPresent,
@@ -98,10 +114,10 @@ func (g *MemoryGuard) VerifyDelete(id string) map[string]any {
 	}
 
 	// Residue is only meaningful for content that actually existed and was removed. Scanning the
-	// SURVIVORS (the store after delete) means a deleted entry can never flag itself (no
-	// self-residue false positive — the truth-table edge case).
+	// SURVIVORS (the store after delete, across EVERY backing index via All()) means a deleted
+	// entry can never flag itself (no self-residue false positive — the truth-table edge case).
 	if existed {
-		if detected, summary := residueScan(deleted.content, g.store); detected {
+		if detected, summary := residueScan(deleted.content, g.store.All()); detected {
 			out["residue_detected"] = true
 			out["residue_summary"] = summary
 		}

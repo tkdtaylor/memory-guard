@@ -17,11 +17,13 @@ import (
 
 // seedEntry writes content directly into the store (bypassing the write-gate / PII redaction so
 // the residue scan is tested on the literal content the corpus specifies) and returns its id.
+// It routes through the MemoryStore seam's Put verb (task 006) instead of indexing the raw map,
+// so the same helper works against any store backing — behavior is identical to the v0 map write.
 func seedEntry(g *MemoryGuard, content string) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	id := "mem-" + randHex(6)
-	g.store[id] = entry{content: content}
+	g.store.Put(id, entry{content: content})
 	return id
 }
 
@@ -120,11 +122,11 @@ func TestVerifyDeleteTruthTable(t *testing.T) {
 func TestDeletionHashDeterministic(t *testing.T) {
 	// Same logical deletion (same id + content) on a fresh store → same hash.
 	g1 := NewMemoryGuard(nil)
-	g1.store["mem-fixed"] = entry{content: "delete me exactly"}
+	g1.store.Put("mem-fixed", entry{content: "delete me exactly"})
 	h1 := g1.VerifyDelete("mem-fixed")["deletion_hash"].(string)
 
 	g2 := NewMemoryGuard(nil)
-	g2.store["mem-fixed"] = entry{content: "delete me exactly"}
+	g2.store.Put("mem-fixed", entry{content: "delete me exactly"})
 	h2 := g2.VerifyDelete("mem-fixed")["deletion_hash"].(string)
 
 	if h1 != h2 {
@@ -136,7 +138,7 @@ func TestDeletionHashDeterministic(t *testing.T) {
 
 	// Different deleted content → different hash.
 	g3 := NewMemoryGuard(nil)
-	g3.store["mem-fixed"] = entry{content: "a different secret entirely"}
+	g3.store.Put("mem-fixed", entry{content: "a different secret entirely"})
 	h3 := g3.VerifyDelete("mem-fixed")["deletion_hash"].(string)
 	if h3 == h1 {
 		t.Fatalf("TC-004: different deleted content must hash differently, both %s", h1)
