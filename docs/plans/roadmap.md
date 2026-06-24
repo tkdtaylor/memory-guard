@@ -88,9 +88,9 @@ So the real remaining gap is **the identity-propagation contract**: the shape of
 claim memory-guard receives on each `validate_*`, and who verifies it. That is one interface decision,
 not an upstream build.
 
-**Recommended resolution (ratify in the task-009 REQ-007 ADR): memory-guard receives a *pre-verified*
-SPIFFE principal — the normalized SPIFFE ID plus a `trust_tier` (e.g. `attested`) — and does NOT
-re-verify the SVID itself.** Verification (SVID chain, Ed25519 signature, replay) stays agent-mesh's
+**Recommended resolution ([ADR-004](../architecture/decisions/004-identity-propagation.md), *Proposed*;
+ratified when task 009 implements): memory-guard receives a *pre-verified* SPIFFE principal — the
+normalized SPIFFE ID plus a `trust_tier` (e.g. `attested`) — and does NOT re-verify the SVID itself.** Verification (SVID chain, Ed25519 signature, replay) stays agent-mesh's
 job; the hosting agent's mesh receiver hands the trusted principal across memory-guard's `0600`
 UID-gated socket. memory-guard binds/matches on the SPIFFE ID and enforces isolation only when
 `trust_tier` is attested; an unverified/absent principal hits the documented no-identity fallback (009

@@ -17,7 +17,9 @@
 >
 > **What remains is one interface decision, not an upstream build: the identity-propagation contract** —
 > the shape of the verified SPIFFE claim memory-guard receives on each `validate_*`, and who verifies it.
-> **Recommended (ratify in the REQ-007 ADR): receive a *pre-verified* SPIFFE principal (the normalized
+> This is captured in **[ADR-004](../../architecture/decisions/004-identity-propagation.md)** (status
+> *Proposed*; this task ratifies it).
+> **Recommended (ADR-004): receive a *pre-verified* SPIFFE principal (the normalized
 > SPIFFE ID + a `trust_tier`); do NOT re-verify the SVID in-guard.** Verification stays agent-mesh's job;
 > enforce isolation only when the principal is `attested`; an unverified/absent principal → the REQ-005
 > fallback. Why: the `< 1 ms` hot-path budget rules out per-call X.509 verification, and the seam
@@ -89,7 +91,7 @@ Requirements describe the **target** behavior once unblocked. Per-REQ blocker ca
 | REQ-004 | The **un-scoped whole-store substring read** in `ValidateRead` is replaced by an identity-scoped lookup; matching is exact on the normalized identity key, not substring/fuzzy. | must have | — (mechanics local; correctness needs REQ-001/002) |
 | REQ-005 | **No-identity / unauthenticated read** falls back to the **documented** behavior (an explicit, spec'd policy — e.g. deny, or return only entries written with no bound identity); it is **not** an implicit return-everything. The chosen policy is recorded in the spec + an ADR. | must have | — (policy decision; document it) |
 | REQ-006 | PII redaction on read is **unchanged** (defense in depth still runs on whatever the scoped set returns); the write-gate stays fail-closed; **no detector specifics** leak into the identity-matching path. | must have | — |
-| REQ-007 | The identity model is **documented in an ADR** that ratifies the propagation/verification decision (recommended: a pre-verified SPIFFE principal from agent-mesh, not re-verified in-guard) — how the principal is consumed, normalized, bound, and matched; what "match" means for a SPIFFE ID; and the no-identity fallback. | must have | — (decision is recommended above; ADR ratifies it) |
+| REQ-007 | The identity model is documented in **[ADR-004](../../architecture/decisions/004-identity-propagation.md)** (drafted, status *Proposed*) — which this task ratifies (Proposed → Accepted) and fills in its "To confirm at implementation" section: the no-identity fallback (REQ-005), the `trust_tier` predicate, and the durable per-identity index. | must have | — (ADR-004 drafted; task ratifies) |
 
 ## Readiness gate
 
