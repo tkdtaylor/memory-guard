@@ -2,7 +2,7 @@
 
 **Linked task:** [`docs/tasks/backlog/014-injection-recall-lift-phased.md`](../backlog/014-injection-recall-lift-phased.md)
 **Written:** 2026-06-25
-**Supersedes:** the method in [task 013](../backlog/013-injection-recall-lift.md) (the regex framing-anchor heuristic) — see [ADR-010](../../architecture/decisions/010-injection-recall-approach.md)
+**Supersedes:** the method in [task 013](../completed/013-injection-recall-lift.md) (the regex framing-anchor heuristic) — see [ADR-010](../../architecture/decisions/010-injection-recall-approach.md)
 
 > A second, sounder attempt at the injection-recall lift task 013 failed to ship safely. Task 013
 > cleared unit tests + spec-verifier **twice** but failed adversarial security audit **three times**

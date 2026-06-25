@@ -2,7 +2,7 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-24
-**Status:** ⛔ SUPERSEDED — method rejected (see [ADR-010](../../architecture/decisions/010-injection-recall-approach.md)); goal re-homed in [task 014](014-injection-recall-lift-phased.md)
+**Status:** ⛔ SUPERSEDED — method rejected (see [ADR-010](../../architecture/decisions/010-injection-recall-approach.md)); goal re-homed in [task 014](../backlog/014-injection-recall-lift-phased.md)
 
 > **⛔ SUPERSEDED 2026-06-25 — do not implement this task as written.** The framing-anchor *method*
 > below (regex matching a framing phrase + a directive object within a character window) was attempted
@@ -12,7 +12,7 @@
 > `"do not disclose X"` (benign) from `"no, disclose X"` (attack) requires **grammatical negation
 > scope**, which a character-distance heuristic provably cannot approximate. `main` stays at the sound
 > **0.6875** baseline. The *goal* (lift injection recall) and the sound *measurement discipline*
-> (frozen corpus, precision held, honest floors) carry forward to **[task 014](014-injection-recall-lift-phased.md)**,
+> (frozen corpus, precision held, honest floors) carry forward to **[task 014](../backlog/014-injection-recall-lift-phased.md)**,
 > which splits the safe no-collision recoveries (Phase A) from token-level negation-scope analysis
 > (Phase B) and bakes the SEC-001/006/007 classes in as mandatory adversarial fixtures. Full history:
 > [ADR-010](../../architecture/decisions/010-injection-recall-approach.md). The original spec is
@@ -70,7 +70,7 @@ engine — now correctly scoped to the detector internals that own the injection
   is **not** touched.
 - **The bar + the mechanism:** task 002's suite
   ([`poisoning_suite_test.go`](../../../poisoning_suite_test.go),
-  [completed/002](../../completed/002-adversarial-poisoning-suite.md)) — **measured recall 0.6875 (22/32)
+  [completed/002](002-adversarial-poisoning-suite.md)) — **measured recall 0.6875 (22/32)
   / precision 0.85** over the 32-poisoning / 14-benign `adversarialCorpus`, with **10 documented
   miss-classes**. `backendThresholds` is keyed by `Detector` type-name **precisely so a stronger backend
   raises its bar without touching the corpus** (TC-006). This task **raises** the `*main.RegexDetector` /

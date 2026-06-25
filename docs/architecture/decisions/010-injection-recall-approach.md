@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-06-25
-**Supersedes the approach in:** [task 013](../../tasks/backlog/013-injection-recall-lift.md) (the framing-anchor heuristic). The *goal* (lift write-gate injection recall above the honest 0.6875 baseline) is retained and re-homed in a new task; the *method* is rejected.
+**Supersedes the approach in:** [task 013](../../tasks/completed/013-injection-recall-lift.md) (the framing-anchor heuristic). The *goal* (lift write-gate injection recall above the honest 0.6875 baseline) is retained and re-homed in a new task; the *method* is rejected.
 **Relates to:** [ADR-002](002-detector-backend.md) (the `Detector` seam), task 002 (the `adversarialCorpus` + the 10 documented miss-classes), ADR-009 Finding 1 (the conflation that motivated task 013).
 
 ## Context

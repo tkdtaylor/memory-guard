@@ -1,6 +1,6 @@
 # Test Spec 013: Injection-recall lift — a stronger `DetectInjection` heuristic
 
-**Linked task:** [`docs/tasks/backlog/013-injection-recall-lift.md`](../backlog/013-injection-recall-lift.md)
+**Linked task:** [`docs/tasks/completed/013-injection-recall-lift.md`](../completed/013-injection-recall-lift.md) — ⛔ SUPERSEDED, see [ADR-010](../../architecture/decisions/010-injection-recall-approach.md)
 **Written:** 2026-06-24
 
 > Authored ahead of execution. This task strengthens the **native injection heuristic**

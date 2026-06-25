@@ -3,7 +3,7 @@
 **Project:** memory-guard
 **Created:** 2026-06-25
 **Status:** backlog (not started — ❌)
-**Supersedes the method in:** [task 013](013-injection-recall-lift.md) (the regex framing-anchor heuristic)
+**Supersedes the method in:** [task 013](../completed/013-injection-recall-lift.md) (the regex framing-anchor heuristic)
 **Driven by:** [ADR-010](../../architecture/decisions/010-injection-recall-approach.md) — the deferred-work decision this task implements
 
 > **A second, sounder attempt at the injection-recall lift task 013 failed to ship safely.** Task 013
