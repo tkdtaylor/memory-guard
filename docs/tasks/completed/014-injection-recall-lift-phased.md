@@ -2,9 +2,21 @@
 
 **Project:** memory-guard
 **Created:** 2026-06-25
-**Status:** backlog (not started — ❌)
+**Status:** **Phase A ✅ shipped (recall 0.8125 / precision 0.8667) · Phase B deferred indefinitely** — see [ADR-011](../../architecture/decisions/011-cap-injection-recall-at-phase-a.md)
 **Supersedes the method in:** [task 013](../completed/013-injection-recall-lift.md) (the regex framing-anchor heuristic)
 **Driven by:** [ADR-010](../../architecture/decisions/010-injection-recall-approach.md) — the deferred-work decision this task implements
+
+> **OUTCOME (2026-06-25, [ADR-011](../../architecture/decisions/011-cap-injection-recall-at-phase-a.md)).** **Phase A SHIPPED** — the no-collision
+> recoveries (`[INJECT:]` prefix, AI-object-anchored jailbreak, base64/URL decode-then-rescan) lifted injection recall to
+> **0.8125 (26/32)** at precision **0.8667** on the byte-for-byte-unchanged `adversarialCorpus`, behind the unchanged
+> `Detector` seam, stdlib-only, fail-closed. Cleared spec-verifier APPROVE **and** the mandatory security-auditor pass
+> (SEC-A-001/002 over-rejection found and fixed before ship). **Phase B NOT SHIPPED — deferred indefinitely.** The
+> token-level negation-scope analyzer reached recall 1.00 with a green unit suite but failed the adversarial security-auditor
+> gate **four consecutive rounds**, each round a fresh ordinary-English construction reopening the **fail-open** direction
+> (SEC-B-001…008: inflections, cease-synonyms, particle/phrasal halt verbs, pre-posed cessation, comma-parentheticals).
+> Per ADR-010's principle — *a sound lower-recall gate beats a fail-open higher-recall one* — Phase A is shipped and Phase B
+> is capped. A future Phase B needs a fundamentally different (grammatical-parse / dependency-backed) method behind the same
+> seam, not another round of stdlib token-rules — it is **not** an actionable backlog item (ADR-011 Consequences).
 
 > **A second, sounder attempt at the injection-recall lift task 013 failed to ship safely.** Task 013
 > tried to recover the framing-based miss-classes (`remember:` / `from now on` / `whenever` / `any AI` /
