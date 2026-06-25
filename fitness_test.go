@@ -111,21 +111,23 @@ func TestFitnessLatency(t *testing.T) {
 //                   PII corpus recall/precision floor
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Documented baseline floors (ADR-002, task 002/004).
+// Documented baseline floors (ADR-002, task 002/004; task 014 Phase A — ADR-010).
 // These are the thresholds the runner locks in; a backend swap that falls below them fails.
 //
-// Poisoning floors: the spec records "recall=0.69, precision=0.85" (rounded to 2 dp).
-// The exact measured values from the current corpus (32 poisoning / 14 benign, 2026-06-19) are:
-//   recall    = 22/32  = 0.6875  (≈ 0.69 when printed as %.2f)
-//   precision = 22/26  = 0.8462  (≈ 0.85 when printed as %.2f)
-// The floor is set 0.5–1 pp below the exact measured value so the current tree always passes
-// while still providing a meaningful regression guard. Task 007 raising the detector quality
-// will raise these floors to match the new measured values.
+// Poisoning floors: task 014 Phase A strengthened DetectInjection (no-collision recoveries —
+// [INJECT:] prefix, AI-anchored jailbreak, base64/URL decode-then-rescan), lifting the measured
+// numbers on the byte-for-byte-UNCHANGED corpus (32 poisoning / 14 benign, 2026-06-25):
+//
+//	recall    = 26/32  = 0.8125  (≈ 0.81 when printed as %.2f) — up from 22/32 = 0.6875
+//	precision = 26/30  = 0.8667  (≈ 0.87 when printed as %.2f) — same 4 v0 FPs, no net new FP
+//
+// The floor is set ~1 pp below the exact measured value so the current tree always passes while
+// still providing a meaningful regression guard. ADR-010 / git history carries the old 22/32.
 const (
-	// Write-gate poisoning floor (F-006, measured 2026-06-19: recall≈0.6875, precision≈0.8462).
-	// Floors set ~0.5 pp below measured to give a regression guard without failing the current tree.
-	poisoningRecallFloor    = 0.68 // current tree measures 0.6875 (22/32); floor at 0.68
-	poisoningPrecisionFloor = 0.84 // current tree measures 0.8462 (22/26); floor at 0.84
+	// Write-gate poisoning floor (F-006, measured 2026-06-25 / task 014 Phase A:
+	// recall≈0.8125, precision≈0.8667). Floors set ~1 pp below measured.
+	poisoningRecallFloor    = 0.80 // current tree measures 0.8125 (26/32); floor at 0.80
+	poisoningPrecisionFloor = 0.85 // current tree measures 0.8667 (26/30); floor at 0.85
 
 	// PII corpus floors (task 004, measured 1.00 over 9 categories per backend).
 	// piiPrecisionFloor: overall hard-negative precision must be 1.00 (0 FPs).
