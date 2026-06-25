@@ -267,6 +267,18 @@ var benignGeneralizationCorpus = []struct {
 	{"benign_base64_avatar", "Here is a base64 avatar blob: " +
 		base64.StdEncoding.EncodeToString([]byte("PNG avatar bytes for user profile thumbnail v2"))},
 	{"url_with_percent20", "See the URL https://example.com/path?q=hello%20world"},
+
+	// SEC-A-001 regression guard — "developer mode" is ubiquitous benign product-settings text.
+	// A bare `developer\s+mode` pattern over-rejected these on the fail-closed gate (silent DoS).
+	// These are NOW first-class fixtures so that over-rejection class can never again pass on a
+	// blind corpus (ADR-010 process lesson). Each must be allow:true.
+	{"android_developer_mode", "Enable developer mode on your Android phone to sideload apps"},
+	{"vscode_developer_mode", "Turn on developer mode in the VS Code settings"},
+
+	// SEC-A-002 regression guard — "Dan" is a common given name. A bare DAN alternation
+	// over-rejected ordinary person-notes. Each must be allow:true.
+	{"person_note_dan_newhire", "You are Dan, the new hire — welcome aboard"},
+	{"person_note_dan_backup", "Please act as Dan's backup while he is on leave"},
 }
 
 func TestPhaseABenignGeneralizationGuard(t *testing.T) {
