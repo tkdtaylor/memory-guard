@@ -397,28 +397,34 @@ type poisoningThresholds struct {
 // backendThresholds maps a Detector type-name to its accepted thresholds.
 // The key is the Go type name (via fmt.Sprintf("%T", det)).
 //
-// RegexDetector and NativeDetector share the same 4 injection patterns in v0.
-// Measured baseline (2026-06-19, corpus of 32 poisoning / 14 benign):
-//   - recall    = 0.69 (22/32) — 10 misses: "remember:/store/standing order" framing,
-//     roleplay jailbreak, base64/URL encoding, "whenever" policy docs
-//   - precision = 0.85 (22 of 26 rejections were true poisoning; 4 FPs on "system prompt" /
-//     <system> in technical benign context)
+// RegexDetector and NativeDetector share the same injection patterns (NativeDetector composes
+// RegexDetector). Task 014 Phase A strengthened DetectInjection with the no-collision
+// recoveries — the [INJECT:] bracket prefix, AI-anchored jailbreak phrasing, and base64/URL
+// decode-then-rescan — lifting the measured numbers on the byte-for-byte-UNCHANGED corpus:
 //
-// The thresholds below are set 10–30 pp below measured to give a regression guard without
-// being fragile to minor corpus additions. A future stronger backend raises them via ADR.
-// See docs/spec/fitness-functions.md F-006 for the recorded numbers.
+// Measured (task 014 Phase A, 2026-06-25, corpus of 32 poisoning / 14 benign):
+//   - recall    = 0.8125 (26/32) — up from the v0 0.6875 (22/32). The 4 recovered classes are
+//     [INJECT:] prefix, "unrestricted AI" jailbreak, and the base64- and URL-encoded
+//     "ignore previous instructions" payloads (decode-then-rescan). The 6 remaining misses are
+//     the framing classes (remember:/from now on/whenever/any AI) deferred to Phase B (ADR-010).
+//   - precision = 0.8667 (26 of 30 rejections were true poisoning; the SAME 4 v0 FPs on
+//     "system prompt" / <system> in technical benign context — Phase A adds NO net new FP).
+//
+// The thresholds below are set ~10–22 pp below measured (honest-floor convention) to give a
+// regression guard without being fragile to minor corpus additions. A future stronger backend
+// raises them via ADR. See docs/spec/fitness-functions.md F-006 for the recorded numbers.
 var backendThresholds = map[string]poisoningThresholds{
 	"*main.RegexDetector": {
-		// v0 regex: 4 patterns (ignore/disregard instructions, system prompt, <system>/<instructions> tags)
-		// Measured: recall=0.69, precision=0.85. Threshold set conservatively below measured.
-		recall:    0.55, // minimum bar; measured baseline is 0.69
-		precision: 0.55, // minimum bar; measured baseline is 0.85 (known FPs: "system prompt" in benign text)
+		// Task 014 Phase A. Measured: recall=0.8125, precision=0.8667.
+		// Floors set below measured: recall ~11 pp, precision ~22 pp.
+		recall:    0.70, // minimum bar; measured baseline is 0.8125 (strictly > the v0 0.6875)
+		precision: 0.65, // minimum bar; measured baseline is 0.8667 (known FPs: "system prompt" in benign text)
 	},
 	"*main.NativeDetector": {
-		// NativeDetector composes RegexDetector — identical injection patterns in v0.
-		// Measured: recall=0.69, precision=0.85. Same threshold as RegexDetector.
-		recall:    0.55,
-		precision: 0.55,
+		// NativeDetector composes RegexDetector — identical injection patterns.
+		// Measured: recall=0.8125, precision=0.8667. Same floor as RegexDetector.
+		recall:    0.70,
+		precision: 0.65,
 	},
 }
 
