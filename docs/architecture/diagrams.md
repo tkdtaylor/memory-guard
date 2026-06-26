@@ -47,8 +47,6 @@ integration — v0 returns detections as `flags` but does not emit them.
 
 ## 2. Containers & Components — inside the binary
 
-> One deployable unit (the static Go binary). The load-bearing components a contributor touches first:
-
 ```mermaid
 C4Component
     title Component view of memory-guard (single binary)
