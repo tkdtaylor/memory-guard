@@ -1,91 +1,130 @@
-# memory-guard — context-poisoning & memory-I/O defense (ASI06)
+# memory-guard
 
-Gates every memory read and write an agent performs. PII never lands in stored context unredacted; poisoned writes are flagged and rejected at ingestion; and deletions are **verified** — the industry gap most memory stores skip.
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Go version](https://img.shields.io/github/go-mod/go-version/tkdtaylor/memory-guard)](go.mod)
+[![Last commit](https://img.shields.io/github/last-commit/tkdtaylor/memory-guard)](https://github.com/tkdtaylor/memory-guard/commits)
 
-- **Write-gate (built delta)** — flag/reject context-poisoning at ingestion (fail-closed on suspected injection)
-- **PII redaction** — recognizers redact emails/SSNs/cards/API-keys before storage
-- **Post-deletion verification (built delta)** — `verify_delete` proves an entry is actually gone
+**A memory-I/O gate that screens agent context for poisoning and verifies deletions.** It sits in front
+of any agent memory store and gates every read and write: poisoned writes are detected and rejected at
+ingestion (fail-closed); PII is redacted before it lands in the store and again on read; and deletions
+are verified — proven gone, not merely deleted. It addresses the OWASP Agentic threat **ASI06** (Memory
+& Context Poisoning), the industry gap most memory stores skip. Standalone block in the
+[Secure Agent Ecosystem](https://github.com/tkdtaylor/agent-builder#the-building-blocks), Apache-2.0 licensed.
 
-> Prior-art verdict: **DERIVE** — ADOPT Microsoft Presidio (PII) and sit in front of any MemoryStore; BUILD the write-gate + post-deletion verification + adversarial suite.
->
-> **Language: Go.** The block itself (contract, write-gate orchestration, delete-verification, IPC, hot-path gate) is Go — uniform with the rest of the ecosystem, single static binary, low per-call overhead on a path that gates *every* memory op. The one Python-leaning dependency (Presidio) is isolated **behind the `Detector` seam** ([detector.go](detector.go)): v0 ships pure-Go detectors (`RegexDetector` and the Go-native `NativeDetector`, the resolved backend per [ADR-002](docs/architecture/decisions/002-detector-backend.md)); a Presidio-backed detector (sidecar/subprocess or ONNX runtime) is deferred-not-foreclosed and slots in behind the same seam without touching the guard or contract. *Adopt the tool behind a seam; don't let it dictate the substrate.* **License: Apache-2.0.**
+> **Status.** The write-gate, PII redaction, and post-deletion verification are working and
+> tracer-validated over the live IPC server. Pure-Go detectors (`RegexDetector` and `NativeDetector`)
+> ship with the binary; a Presidio-backed detector (sidecar) is built and behind the pluggable seam
+> but integration is deferred. See [docs/plans/roadmap.md](docs/plans/roadmap.md) for the full
+> pipeline and current status.
 
-## Scope
+## Contents
 
-**What memory-guard does:** defense for what gets written into agent memory/context — PII detection plus poisoning/injection screening at the memory-write boundary (ASI06).
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [The gates](#the-gates)
+- [Develop locally](#develop-locally)
+- [Tech stack](#tech-stack)
+- [Sponsorship](#sponsorship)
+- [Enterprise support](#enterprise-support)
+- [License](#license)
 
-**What it does *not* do (and which sibling owns it instead):**
-- Guard the inbound prompt / tool-call boundary → **[armor](https://github.com/tkdtaylor/armor)** (armor guards what comes in; memory-guard guards what gets stored)
-- Store or broker secrets → **[vault](https://github.com/tkdtaylor/vault)**
-- Authorize actions → **[policy-engine](https://github.com/tkdtaylor/policy-engine)**
+## Quick start
 
-`memory-guard` is one block in a composable secure-agent ecosystem — each block is standalone and independently usable, and composes with its siblings over published contracts rather than absorbing their responsibilities (no central "god object").
+The fastest way to see it work takes one command — no database, no network, no setup:
 
-## Contract ([docs/CONTRACT.md](docs/CONTRACT.md))
+```bash
+git clone https://github.com/tkdtaylor/memory-guard && cd memory-guard
 
-```
-validate_read(query, identity)  -> { allow, content_redacted, flags }
-validate_write(entry, identity) -> { allow, stored_id, flags }
-verify_delete(id)               -> { confirmed, residue_detected, residue_summary?, deletion_hash }
-```
-
-> Note: these contract shapes are **tracer-validated** — memory-guard's own tracer-bullet
-> (roadmap T6, [ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)) drives
-> `validate_write → validate_read → verify_delete` over the live `serve` socket against the real
-> `MemoryStore` seam, asserting each verb's response field-by-field on the JSON decoded off the
-> socket. The shapes validated **unchanged**. (The detector dimension was validated against the v0
-> `NativeDetector`; a real-Presidio-backend re-validation is a noted follow-up — shapes are
-> detector-agnostic behind the `Detector` seam.)
-
-## Build & run
-
-```sh
-go build ./... && go test ./...
-go run . write "contact alice@example.com"          # redacts PII, stores
-go run . serve --socket /run/memguard.sock          # IPC daemon
+go run . write "my email is alice@example.com"
 ```
 
-IPC: `{"op":"validate_write","entry":"…"}` · `{"op":"validate_read","query":"…"}` ·
-`{"op":"verify_delete","id":"…"}` · `{"op":"ping"}`.
+Output shows PII redacted to a placeholder before storage, and an opaque `stored_id` returned so the
+agent never learns what was stored. To read back with redaction applied:
 
-## Documentation
+```bash
+go run . read "email"
+```
 
-- [docs/architecture/overview.md](docs/architecture/overview.md) — system design and design principles
-- [docs/architecture/diagrams.md](docs/architecture/diagrams.md) — C4 diagrams and runtime flows
-- [docs/spec/SPEC.md](docs/spec/SPEC.md) — authoritative spec
-- [docs/plans/roadmap.md](docs/plans/roadmap.md) — roadmap and current status
-- [docs/CONTRACT.md](docs/CONTRACT.md) — contract reference
+For the full write→read→verify-delete cycle, run as an IPC daemon (what agent-builder uses):
 
-## Status
+```bash
+go run . serve --socket /run/memguard.sock &
+# Then from another tool, send: {"op":"validate_write","entry":"contact alice@example.com"}
+# And verify deletion with: {"op":"verify_delete","id":"mem-3785de541ddf"}
+```
 
-🟢 **Contract tracer-validated; detector backends real.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (enforced floor: recall 0.8125 / precision 0.867, task 014 Phase A; PII corpus recall/precision 1.00), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`, the default) plus an opt-in **Presidio-backed NER sidecar** (task 007, ADR-009), a real `MemoryStore` seam (`InMemoryStore` default + multi-index `TwoIndexStore`), identity bound-and-matched, and post-deletion verification with multi-index residue detection + deletion-hash. The `validate_*`/`verify_delete` contract is tracer-validated over the live `serve` socket (T6 / ADR-008).
+See [docs/CONTRACT.md](docs/CONTRACT.md) for the full IPC wire format and `verify_delete` semantics.
 
-The five historically "v1"-labelled tasks (001–005) hardened the v0 substrate; tasks 006–011 then made the load-bearing stand-ins real: a real `MemoryStore` seam (006/008), identity bound-and-matched (009), audit emission (010, default-off), and — the gating item — a **tracer-validated contract** (011, [ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)): the `validate_*`/`verify_delete` shapes are now proven against the live `serve` socket with a real store and a real consumer, validated **unchanged**. The **real detection backend** then landed as well: an opt-in Presidio-backed sidecar behind the unchanged `Detector` seam (task 007, ADR-009), with the injection-recall lift phased in on top (tasks 013–014 — Phase A enforced by F-006 at recall 0.8125 / precision 0.867; the remaining framing classes are deferred to Phase B, ADR-011). The contract tracer's caveat stands: it validated the detector dimension against the v0 backend, and the real-backend re-validation remains a noted follow-up. See [Toward a true v1](docs/plans/roadmap.md#toward-a-true-v1-substrate-not-just-tasks) in the roadmap.
+## How it works
 
-## Adapter seam & standards
+An agent writes context to memory. memory-guard intercepts that write, detects poisoning and PII,
+redacts what it finds, stores what's safe, and returns an opaque ID. On read, it redacts again. On
+deletion, it verifies the entry is actually gone and scans surviving entries for leaked fragments.
 
-`Detector` interface (PII + injection detection) — pluggable: `RegexDetector` and Go-native
-`NativeDetector` (default), and an opt-in Presidio-backed sidecar (task 007). Sits in front of any
-LangChain/LlamaIndex MemoryStore behind the validate_* verbs.
+```mermaid
+flowchart LR
+  W[Write<br/>context] --> DET{Detect<br/>poisoning?}
+  DET -->|reject| ER["❌ Rejected<br/>poisoned write"]
+  DET -->|redact| S["✓ Store<br/>with PII→labels"]
+  S --> ID["Return opaque<br/>stored_id"]
+  R[Read<br/>query] --> RED["Redact PII<br/>in response"]
+  D[Delete<br/>stored_id] --> VER["Verify absent<br/>+ scan residue"]
+  VER --> HASH["Return deletion<br/>hash + residue"]
+```
 
-## License
+The design sits on three principles:
 
-memory-guard is licensed under the **Apache License 2.0** — free to use, modify, and distribute, including in commercial and proprietary products. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+- **Fail-closed on poisoning.** A write flagged as injection or known-poisoning is rejected outright,
+  never stored.
+- **PII never lands raw.** Redaction happens before storage and again on read. The agent never sees
+  the raw PII; it receives placeholders like `<EMAIL>` or `<CREDIT_CARD>`.
+- **Deletion is verified, not assumed.** A delete operation re-checks the store to confirm the entry
+  is gone and scans other entries for leaked fragments (normalized substring match). You get back a
+  deletion hash and a residue report.
 
-> **Security notice:** memory-guard is a security tool provided **as-is, without warranty**. It does not guarantee the security of any system. See the disclaimer in [NOTICE](NOTICE).
+Detection sits behind a pluggable `Detector` seam (`detector.go`). The binary ships with pure-Go
+detectors; a Presidio-backed sidecar or ONNX-native model can be swapped in without touching the gate
+or contract.
 
-## Enterprise Support
+Deeper detail: [architecture overview](docs/architecture/overview.md),
+[diagrams](docs/architecture/diagrams.md), and the [spec](docs/spec/SPEC.md).
 
-Need hardened deployments, integration help, or a support SLA? **Commercial support and consulting are available.**
+## The gates
 
-📧 Contact **[tools@taylorguard.me](mailto:tools@taylorguard.me)**
+| Operation | What it does | Output |
+|-----------|--------------|--------|
+| **write-gate** | Detects context-poisoning (injection + known-poison rules) at ingestion; rejects if suspected | `allow: true/false`, `stored_id`, `flags` |
+| **PII redaction** | Detects and redacts PII (email, SSN, API key, credit card, etc.) before storage and on read | Placeholders (`<EMAIL>`, `<SSN>`, etc.) replace raw PII |
+| **delete verify** | Deletes entry, re-checks absence, scans remaining entries for residue fragments | `confirmed: true/false`, `residue_detected`, `deletion_hash` |
+| **IPC daemon** | Unix-socket server accepting newline-delimited JSON ops: `validate_write`, `validate_read`, `verify_delete`, `ping` | JSON responses over socket |
+
+## Develop locally
+
+```bash
+go test ./...                 # tests (including injection recall floor + PII corpus)
+go build ./...                # compile
+make check                    # the verification gate: lint + test + fitness
+```
+
+Contributing follows a test-spec-first, one-task-one-branch workflow. Read
+[AGENTS.md](AGENTS.md) (the canonical, harness-neutral briefing) before starting; tasks and their
+specs live under [docs/tasks/](docs/tasks/).
+
+## Tech stack
+
+Go 1.26 — memory-I/O gate and IPC daemon over a single static binary. Pure-Go detectors included; Presidio
+integration available. See [docs/architecture/tech-stack.md](docs/architecture/tech-stack.md).
 
 ## Sponsorship
 
-memory-guard is independent, open-source security tooling. If it saves you time or risk, consider sponsoring continued development:
+memory-guard is independent, open-source security tooling. If it saves you time or risk, [sponsoring its development](https://github.com/sponsors/tkdtaylor) is the most direct way to keep it maintained.
 
-- 💜 [GitHub Sponsors](https://github.com/sponsors/tkdtaylor)
+## Enterprise support
 
-## Contributing
+Commercial support, integration help, and SLAs are available. Apache-2.0 means you can build on memory-guard freely; paid support is a partner if you want one, never a requirement. Contact [tools@taylorguard.me](mailto:tools@taylorguard.me).
 
-Contributions are welcome and become part of the project under Apache-2.0. See [CONTRIBUTING.md](CONTRIBUTING.md). We use the **Developer Certificate of Origin (DCO)** — sign off your commits with `git commit -s`. No CLA required.
+## License
+
+[Apache License 2.0](LICENSE) — consistent with the other blocks in the Secure Agent Ecosystem.
+See [NOTICE](NOTICE) for attribution and disclaimers, and [CONTRIBUTING.md](CONTRIBUTING.md) for
+the inbound=outbound / DCO contribution terms.
