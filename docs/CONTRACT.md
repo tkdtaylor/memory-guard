@@ -1,6 +1,6 @@
 # memory-guard contract (tracer-validated)
 
-Mirrors `interface-contracts.md §2`. These shapes are **tracer-validated**: memory-guard's own
+These shapes are **tracer-validated**: memory-guard's own
 tracer-bullet (roadmap T6, [ADR-008](architecture/decisions/008-contract-tracer-validation.md))
 drives `validate_write → validate_read → verify_delete` over the live `serve` Unix socket against
 the real `MemoryStore` seam, asserting each verb's response field-by-field on the JSON decoded off

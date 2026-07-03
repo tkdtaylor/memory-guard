@@ -38,8 +38,9 @@ import (
 //
 // Fail-closed: if the sidecar is unavailable (not started, crashed, or the request errors),
 // RedactPII falls back to the native redaction (PII still redacted — never a silent pass of
-// raw PII) and surfaces the degradation through pii flags only; the guard/IPC error shape is
-// untouched and no Presidio-typed error ever leaks past the seam.
+// raw PII). The fallback is silent at the contract surface — callers see the native flags
+// only, with no degradation marker; the guard/IPC error shape is untouched and no
+// Presidio-typed error ever leaks past the seam.
 type PresidioDetector struct {
 	native *NativeDetector // composed: structured PII + injection heuristic (always available)
 

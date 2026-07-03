@@ -16,7 +16,7 @@ clean:
 # ── fitness-function runner (task 012) ─────────────────────────────────────
 #
 # Three enforced gates (all block-severity):
-#   fitness-latency          — per-op detect cost < 1 ms (REQ-003 / F-001 latency)
+#   fitness-latency          — per-op detect cost < 1 ms (REQ-003 / F-007 latency)
 #   fitness-recall-precision — write-gate + PII recall/precision floors (REQ-004 / F-006)
 #   fitness-seam             — no detector/store backend specifics in guard/ipc/main/contract (REQ-005 / F-004)
 #

@@ -21,7 +21,7 @@ Gates every memory read and write an agent performs. PII never lands in stored c
 
 `memory-guard` is one block in a composable secure-agent ecosystem — each block is standalone and independently usable, and composes with its siblings over published contracts rather than absorbing their responsibilities (no central "god object").
 
-## Contract (interface-contracts.md §2)
+## Contract ([docs/CONTRACT.md](docs/CONTRACT.md))
 
 ```
 validate_read(query, identity)  -> { allow, content_redacted, flags }
@@ -58,14 +58,14 @@ IPC: `{"op":"validate_write","entry":"…"}` · `{"op":"validate_read","query":"
 
 ## Status
 
-🟢 **Contract tracer-validated; real-detector backend pending.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (honest baseline: recall 0.69 / precision 0.85 on the v0 backends), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`), a real `MemoryStore` seam (`InMemoryStore` default + multi-index `TwoIndexStore`), identity bound-and-matched, and post-deletion verification with multi-index residue detection + deletion-hash. The `validate_*`/`verify_delete` contract is tracer-validated over the live `serve` socket (T6 / ADR-008).
+🟢 **Contract tracer-validated; detector backends real.** Working write-gate (injection flag + fail-closed) with an adversarial poisoning test-suite (enforced floor: recall 0.8125 / precision 0.867, task 014 Phase A; PII corpus recall/precision 1.00), pure-Go `Detector`s behind the seam (`RegexDetector` + Go-native `NativeDetector`, the default) plus an opt-in **Presidio-backed NER sidecar** (task 007, ADR-009), a real `MemoryStore` seam (`InMemoryStore` default + multi-index `TwoIndexStore`), identity bound-and-matched, and post-deletion verification with multi-index residue detection + deletion-hash. The `validate_*`/`verify_delete` contract is tracer-validated over the live `serve` socket (T6 / ADR-008).
 
-The five historically "v1"-labelled tasks (001–005) hardened the v0 substrate; tasks 006–011 then made the load-bearing stand-ins real: a real `MemoryStore` seam (006/008), identity bound-and-matched (009), audit emission (010, default-off), and — the gating item — a **tracer-validated contract** (011, [ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)): the `validate_*`/`verify_delete` shapes are now proven against the live `serve` socket with a real store and a real consumer, validated **unchanged**. The one remaining open v1 dimension is the **real detection backend** (Presidio, task 007 — still regex/Go-native today); the contract tracer recorded that the detector dimension was validated against the v0 backend and left the real-backend re-validation as a noted follow-up. See [Toward a true v1](docs/plans/roadmap.md#toward-a-true-v1-substrate-not-just-tasks) in the roadmap.
+The five historically "v1"-labelled tasks (001–005) hardened the v0 substrate; tasks 006–011 then made the load-bearing stand-ins real: a real `MemoryStore` seam (006/008), identity bound-and-matched (009), audit emission (010, default-off), and — the gating item — a **tracer-validated contract** (011, [ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)): the `validate_*`/`verify_delete` shapes are now proven against the live `serve` socket with a real store and a real consumer, validated **unchanged**. The **real detection backend** then landed as well: an opt-in Presidio-backed sidecar behind the unchanged `Detector` seam (task 007, ADR-009), with the injection-recall lift phased in on top (tasks 013–014 — Phase A enforced by F-006 at recall 0.8125 / precision 0.867; the remaining framing classes are deferred to Phase B, ADR-011). The contract tracer's caveat stands: it validated the detector dimension against the v0 backend, and the real-backend re-validation remains a noted follow-up. See [Toward a true v1](docs/plans/roadmap.md#toward-a-true-v1-substrate-not-just-tasks) in the roadmap.
 
 ## Adapter seam & standards
 
 `Detector` interface (PII + injection detection) — pluggable: `RegexDetector` and Go-native
-`NativeDetector` (v0), Presidio-backed (v1, deferred). Sits in front of any
+`NativeDetector` (default), and an opt-in Presidio-backed sidecar (task 007). Sits in front of any
 LangChain/LlamaIndex MemoryStore behind the validate_* verbs.
 
 ## License

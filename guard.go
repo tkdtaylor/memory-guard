@@ -10,7 +10,7 @@ import (
 
 // MemoryGuard gates all agent memory I/O (ASI06).
 //
-// Contract (interface-contracts.md §2):
+// Contract (docs/CONTRACT.md):
 //
 //	validate_write(entry, identity) -> { allow, stored_id, flags }
 //	validate_read(query, identity)  -> { allow, content_redacted, flags }

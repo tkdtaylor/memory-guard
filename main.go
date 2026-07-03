@@ -3,7 +3,7 @@
 // Command memory-guard gates all agent memory I/O (ASI06): PII redaction + a write-gate
 // that rejects suspected context-poisoning + post-deletion verification.
 //
-// Contract (interface-contracts.md §2):
+// Contract (docs/CONTRACT.md):
 //
 //	validate_write(entry, identity) -> { allow, stored_id, flags }
 //	validate_read(query, identity)  -> { allow, content_redacted, flags }

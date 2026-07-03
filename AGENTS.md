@@ -67,7 +67,7 @@ validate_write(entry, identity) -> { allow, stored_id, flags }                  
 verify_delete(id)               -> { confirmed, residue_detected, residue_summary?, deletion_hash }  # post-deletion verification (the industry gap)
 ```
 
-Mirrors `interface-contracts.md §2` and the scoping doc `memory-guard.md`. These
+The contract statement lives in [docs/CONTRACT.md](docs/CONTRACT.md). These
 shapes are **tracer-validated**: memory-guard's own tracer-bullet (roadmap T6,
 [ADR-008](docs/architecture/decisions/008-contract-tracer-validation.md)) drives
 `validate_write → validate_read → verify_delete` over the live `serve` Unix socket

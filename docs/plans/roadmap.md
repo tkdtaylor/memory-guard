@@ -7,8 +7,7 @@ again on read, and deletions are **verified** — proven gone, not merely `delet
 interface + the `validate_*` verbs are the adapter seams, so a Presidio-backed detection backend and a
 real MemoryStore can be swapped without touching callers.
 
-Authoritative design: the project's internal design notes
-+ `interface-contracts.md §2`. As-built foundational stack:
+Authoritative contract: [docs/CONTRACT.md](../CONTRACT.md). As-built foundational stack:
 [ADR-001](../architecture/decisions/001-foundational-stack.md).
 
 ## v0 — write-gate + PII redaction + delete-verification skeleton — ✅ shipped
