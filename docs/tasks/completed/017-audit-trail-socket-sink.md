@@ -2,7 +2,7 @@
 
 **Project:** memory-guard
 **Created:** 2026-07-11
-**Status:** backlog
+**Status:** completed
 
 > Roadmap [T5](../../plans/roadmap.md) / R2 calls for emitting detections to the sibling `audit-trail` block. Completed task 010 (ADR-007) built everything **up to** the wire: the `AuditSink` seam, OCSF-shaped event builders for all four detection classes, `emitSafe` fail-open semantics, the `AsyncSink` non-blocking dispatch, and a default-disabled config gate. What never shipped is a **real transport**: `main.go` never wires `WithAudit`, so in production nothing is ever emitted, and the `deletion_hash` that `verify_delete` has returned since task 003 still has **no consumer**. ADR-007 explicitly deferred this ("emission stays disabled until the audit-trail emit endpoint is confirmed live") and flagged that its OCSF shape was "an assumption pending audit-trail confirmation". That confirmation now exists: the sibling's contract is checkable in-repo at `../audit-trail/docs/CONTRACT.md` and it is **not OCSF**. This task builds the confirmed-contract transport, its opt-in wiring, and records the reconciliation.
 
