@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-07-12 (task 016: store-side `ScanScoped` read verb + shared scope, ADR-013; task 015: persistent file-backed `FileStore` behind the unchanged seam, ADR-012)
+**Last updated:** 2026-07-12 (task 017: opt-in audit-trail emit socket edge, ADR-014; task 016: store-side `ScanScoped` + shared scope, ADR-013; task 015: persistent `FileStore`, ADR-012)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -14,7 +14,7 @@ invalidate the change or the diagram; one must be updated to match the other in 
 > load-bearing internal boundaries: the `Detector` seam (detection backend) and the `MemoryStore` seam
 > (the storage backend — ADR-005, a single in-memory map, a multi-index store, or the persistent
 > file-backed `FileStore` (ADR-012), swapped one-line behind the verbs). Its external integrations are the agent core (the three
-> `validate_*`/`verify_delete` verbs) and `audit-trail` (detection events, v1 — not wired in v0).
+> `validate_*`/`verify_delete` verbs) and `audit-trail` (detection events over its emit socket, opt-in via `serve --audit-socket`, ADR-014).
 > Container and Component collapse into one diagram.
 
 ---
@@ -30,18 +30,19 @@ C4Context
     Person(operator, "Operator", "Runs the daemon / the write|read demo")
 
     System_Ext(store, "Memory store", "The backing MemoryStore behind the seam (ADR-005); ships as a stdlib in-memory map, a multi-index store, or the persistent file-backed FileStore (opt-in MEMGUARD_STORE=file, ADR-012); a LangChain / LlamaIndex / SQLite / vector backend slots in behind the same verbs")
-    System_Ext(audit, "audit-trail", "Receives detection events (OCSF) — v1; not wired in v0")
+    System_Ext(audit, "audit-trail", "Receives detection events over its emit socket (plain hash-chained events; memory-guard translates OCSF→plain at the sink boundary). Opt-in via serve --audit-socket (ADR-014); default off")
     System_Ext(armor, "armor", "Guards the tool-call / web-ingestion path; memory-guard guards what gets STORED")
 
     Rel(agent, memguard, "validate_write / validate_read / verify_delete", "JSON / Unix socket")
     Rel(operator, memguard, "serve / write / read", "CLI")
     Rel(memguard, store, "Put / Scan / Get / Delete / All / AllByIndex", "behind the MemoryStore seam (ADR-005/ADR-006)")
-    Rel(memguard, audit, "detection events (flags → OCSF)", "v1, not wired in v0")
+    Rel(memguard, audit, "emit(event) per detection; deletion_hash in refs", "opt-in --audit-socket, fail-open via AsyncSink (ADR-014)")
 ```
 
 Note: memory-guard guards what gets **stored**; `armor` guards what **enters** the agent (tool calls,
-web ingestion). The two are complementary ASI06/ASI01 layers. The `audit-trail` emission is a v1
-integration — v0 returns detections as `flags` but does not emit them.
+web ingestion). The two are complementary ASI06/ASI01 layers. The `audit-trail` emission is opt-in
+(`serve --audit-socket`, ADR-014) and default-off; the served verbs always return detections as `flags`
+regardless, and emission is an additive, fail-open side channel.
 
 ---
 

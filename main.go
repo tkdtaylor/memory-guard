@@ -84,14 +84,23 @@ func main() {
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ExitOnError)
 		socket := fs.String("socket", "", "unix socket path (required)")
+		auditSocket := fs.String("audit-socket", "", "audit-trail emit socket (opt-in; env MEMGUARD_AUDIT_SOCKET; flag wins)")
 		fs.Parse(os.Args[2:])
 		if *socket == "" {
 			fmt.Fprintln(os.Stderr, "serve: --socket is required")
 			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s, store: %s)\n",
-			*socket, detectorBackend(), storeBackend())
-		if err := serve(*socket, NewMemoryGuard(buildDetector(), buildStore())); err != nil {
+		// audit emission is opt-in and off by default: the --audit-socket flag wins over the
+		// MEMGUARD_AUDIT_SOCKET env fallback; an empty result leaves emission disabled.
+		auditPath := resolveAuditSocket(*auditSocket, os.Getenv("MEMGUARD_AUDIT_SOCKET"))
+		guard := NewMemoryGuard(buildDetector(), buildStore()).WithAudit(buildAuditConfig(auditPath))
+		auditTarget := auditPath
+		if auditTarget == "" {
+			auditTarget = "off"
+		}
+		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s, store: %s, audit: %s)\n",
+			*socket, detectorBackend(), storeBackend(), auditTarget)
+		if err := serve(*socket, guard); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}

@@ -1,7 +1,7 @@
 # Configuration
 
 **Project:** memory-guard
-**Last updated:** 2026-07-12 (task 015: file-backed `MemoryStore` selection via `MEMGUARD_STORE` / `MEMGUARD_STORE_PATH`, ADR-012)
+**Last updated:** 2026-07-12 (task 017: opt-in audit emission via `serve --audit-socket` / `MEMGUARD_AUDIT_SOCKET`, ADR-014; task 015: file-backed store selection, ADR-012)
 
 Every knob the system exposes. memory-guard is configured by **command-line flags** only — there are
 no config files, no application environment variables, and no secrets in v0.
@@ -23,6 +23,7 @@ source, no YAML policy engine, and no store path (the store is in-memory only).
 | Flag | Subcommand | Type | Default | Required | Effect |
 |------|------------|------|---------|----------|--------|
 | `--socket` | `serve` | string (path) | — | yes (serve) | Unix socket to bind; a stale socket at the path is removed first; bound `0600`. Missing → `serve: --socket is required`, exit `2` |
+| `--audit-socket` | `serve` | string (path) | — | no | Opt-in audit-trail emit socket (ADR-014). Absent/empty → emission disabled. Wins over `MEMGUARD_AUDIT_SOCKET`. An unreachable path is **not** a startup error (fail-open soft dependency) |
 
 `write` and `read` take a single positional text/query argument (absent → the empty string). A missing
 subcommand or an unknown subcommand → usage error (exit `2`).
@@ -120,17 +121,30 @@ repo.
 
 ## Audit emission configuration
 
-Audit emission is controlled **programmatically** (not via CLI flags or env vars in v0) through the
-`AuditConfig` struct injected via `(*MemoryGuard).WithAudit`. This is a code-level knob, not an
-operator-visible flag — the operator wires the config at construction time (`main.go` / `ipc.go`).
+Audit emission to the sibling **audit-trail** block is **opt-in and off by default** (ADR-007/ADR-014).
+The `serve` daemon wires it from configuration:
+
+| Source | Value | Default | Effect |
+|--------|-------|---------|--------|
+| `serve --audit-socket <path>` | path | — (absent) | Enables emission to the audit-trail emit socket at `<path>`. Absent/empty → emission disabled. The flag **wins** over the env fallback |
+| `MEMGUARD_AUDIT_SOCKET` | path | — | Env fallback used only when `--audit-socket` is not given. Empty → disabled |
+
+When a path resolves, `serve` wires `guard.WithAudit(buildAuditConfig(path))`, whose sink is an
+`AuditTrailSink` (the confirmed plain-event wire contract, ADR-014) wrapped in `AsyncSink` (non-blocking
+dispatch, so a stalled endpoint drops events rather than stalling the hot path). The `serve` startup
+stderr line names the target: `audit: <path>` or `audit: off`. Emission is **fail-open**: a down, slow,
+absent, or erroring audit-trail never blocks a verdict or surfaces an error (unlike the store/detector
+factories, an unreachable audit path is **not** a construction error — it is a soft runtime dependency).
+
+Below the CLI, emission is the same `AuditConfig` injected via `(*MemoryGuard).WithAudit`:
 
 | Field | Type | Default | Effect |
 |-------|------|---------|--------|
-| `AuditConfig.Enabled` | bool | `false` | `false` → emission disabled (default until audit-trail endpoint confirmed). `true` enables emission only when `Sink` is also non-nil |
-| `AuditConfig.Sink` | `AuditSink` | `nil` | The transport implementation (socket/HTTP/file). `nil` with `Enabled=true` fails closed to disabled (no emission, no crash) |
+| `AuditConfig.Enabled` | bool | `false` | `false` → emission disabled. `true` enables emission only when `Sink` is also non-nil |
+| `AuditConfig.Sink` | `AuditSink` | `nil` | The transport implementation (Unix socket via `AuditTrailSink`, or an in-process test sink). `nil` with `Enabled=true` fails closed to disabled (no emission, no crash) |
 
-**Default:** emission is **disabled** (`AuditConfig{}` zero value). The guard ships with emission off
-until the sibling audit-trail emit endpoint is confirmed live (ADR-007).
+**Default:** emission is **disabled** (`AuditConfig{}` zero value; no `--audit-socket`, no env). Zero
+connections are attempted until a path is configured.
 
 **Invalid config** (`Enabled=true, Sink=nil`): fails closed to disabled — no emission, no crash. This
 is the documented safe degradation for a misconfigured sink.

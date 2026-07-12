@@ -216,7 +216,7 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   pre-verified `trust_tier` across the `0600` socket (ADR-004) and keeps SPIFFE/X.509 specifics behind
   the `Principal` seam.
 
-### B-009: Audit-trail OCSF emission — fail-open, config-gated, default-disabled (task 010 / ADR-007)
+### B-009: Audit-trail emission — fail-open, opt-in, default-off, real socket transport (task 010 / ADR-007; task 017 / ADR-014)
 
 - **Trigger:** any detection that `ValidateWrite` or `VerifyDelete` computes — PII redaction, injection
   rejection, residue found, or deletion — when audit emission is enabled in the `AuditConfig` and a
@@ -240,15 +240,31 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   the guard-computed flag metadata (`"pii:EMAIL"`, `"injection_suspected"`) and the opaque `stored_id`
   / deterministic `deletion_hash` — **never** the raw input text. The memory-guard invariant "PII
   never lands anywhere unredacted" extends to the audit channel.
-- **Config gate:** emission is controlled by `AuditConfig{Enabled, Sink}` injected via
-  `(*MemoryGuard).WithAudit`. **Default: DISABLED** (pending confirmation of the audit-trail emit
-  endpoint — ADR-007). An invalid config (`Enabled: true, Sink: nil`) fails closed to disabled.
+- **Transport (task 017 / ADR-014):** the real sink is `AuditTrailSink` (`audit_trail_sink.go`),
+  speaking the sibling audit-trail block's **confirmed plain-event** wire contract (`{"op":"emit",
+  "event":{ts, actor, action, target, decision?, refs[], context?}}` → `{seq, hash}`), **not** OCSF.
+  The internal `OCSFEvent` is translated to the plain event at the sink boundary (`mapToAuditTrailEvent`),
+  so `guard.go` / `ipc.go` / the event builders / the contract are untouched. Deletion events carry the
+  `deletion_hash` as a `refs` entry (`[{type:"deletion_hash", id:<hash>}]`), its first consumer;
+  `actor` is `"memory-guard"`; every wire number is an int (audit-trail rejects floats). No raw content
+  or PII crosses the wire. An OCSF-native export is a noted follow-on (ADR-014).
+- **Config gate:** emission is **opt-in and OFF by default**. `serve --audit-socket <path>` (env
+  fallback `MEMGUARD_AUDIT_SOCKET`, flag wins) wires `guard.WithAudit(buildAuditConfig(path))`, whose
+  sink is the `AuditTrailSink` wrapped in `AsyncSink` (non-blocking dispatch). An empty path leaves
+  emission disabled (zero connections). An unreachable path still constructs (soft dependency,
+  fail-open at runtime); an invalid config (`Enabled: true, Sink: nil`) fails closed to disabled.
+  *(Tests: task-010 `TestAudit*` suite unchanged; task-017 `TestAuditSinkTC001…TC008` — field-by-field
+  wire mapping, deletion_hash value-for-value, no-floats, fail-safe across dead/hanging/erroring
+  endpoints, opt-in wiring; L6 against the real `audit-trail` binary, chain verifies with the new
+  events in it.)*
   Toggling emission requires reconstructing the guard with a new `WithAudit` call; no live config
   reload in v0.
-- **OCSF event shape note:** the event shape is modelled on the **public OCSF 1.1 standard** as a
-  documented assumption. The sibling audit-trail's exact consumed contract has not been confirmed live
-  (ADR-007). When confirmed, the shape is reconciled in `audit.go`'s event constructors — zero
-  guard/IPC/contract impact.
+- **OCSF event shape note (reconciled, ADR-014):** the **internal** event is modelled on public OCSF
+  1.1 (`audit.go` builders, unchanged). The sibling audit-trail's consumed contract is now confirmed
+  and is the **plain hash-chained event**, not OCSF; the internal event is translated at the sink
+  boundary (`mapToAuditTrailEvent`), so the OCSF builders stayed intact and the guard/IPC/contract took
+  zero impact. Surviving OCSF detail (`ocsf_class_uid`, `severity_id`) rides in `context`. An
+  OCSF-native export is a noted follow-on.
 - **Side effects:** each call to `emitSafe` is a synchronous call to `Sink.Emit`; the default
   `NoOpSink` has zero allocation cost. A real transport (socket/HTTP/file) would add round-trip
   latency only when enabled — not on the default disabled path.
@@ -272,8 +288,9 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 > attested identity, with an unbound-only fallback), via a **linear identity filter** (the durable form
 > is a per-identity index behind the `MemoryStore` seam — deferred). Identity is **pre-verified
 > upstream** (agent-mesh); in-guard SVID verification (`SvidVerifyingPrincipal`) is deferred behind the
-> `Principal` seam. Audit emission is **wired but default-disabled** (ADR-007 — pending confirmation of
-> the audit-trail emit endpoint; the event shape is pinned to public OCSF 1.1, pending live alignment).
+> `Principal` seam. Audit emission is **opt-in and default-off** (ADR-007/ADR-014): the real
+> `AuditTrailSink` speaks the confirmed audit-trail plain-event wire contract (internal OCSF translated
+> at the sink boundary), wired via `serve --audit-socket`.
 > These are stated facts about v0, tracked as limitations in [SPEC.md](SPEC.md) and
 > [fitness-functions.md](fitness-functions.md), not behaviors to rely on as final.
 </content>
