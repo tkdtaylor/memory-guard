@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 010 — AuditSink seam + OCSF emission)
+**Last updated:** 2026-07-12 (task 016: `ScanScoped` seam verb + optional identity `scope` (shared publish), ADR-013)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -40,9 +40,12 @@ Subcommands:
 
 The agent surface. Newline-delimited JSON over the Unix socket bound by `serve --socket`. One request
 object per connection (read up to the first `\n`); the connection closes after the response. The
-`identity` field is the **typed principal** `{ "spiffe_id": string, "trust_tier": string }` (ADR-004) —
+`identity` field is the **typed principal** `{ "spiffe_id": string, "trust_tier": string, "scope"?: string }` (ADR-004, ADR-013) —
 parsed (`req["identity"]` as a map) and decoded through the `Principal` seam, then **enforced** on
 `validate_read`: a writer's entry is returned only under a **matching attested** identity (see below).
+The optional `scope` is meaningful on `validate_write` only: `scope == "shared"` from an **attested**
+writer publishes the entry to the shared scope (readable under every identity); it is **ignored** from
+an unattested writer (binds unbound) and **ignored** on `validate_read`.
 `identity` is **pre-verified upstream** (agent-mesh owns SVID issuance + verification and emits
 `trust_tier == "attested"` on success); the guard trusts the claim across the `0600` socket and adds no
 in-guard SVID/X.509 verification (deferred behind the `Principal` seam).
@@ -50,8 +53,8 @@ in-guard SVID/X.509 verification (deferred behind the `Principal` seam).
 | Op | Request | Response |
 |----|---------|----------|
 | `ping` | `{"op":"ping"}` | `{"ok":true}` |
-| `validate_write` | `{"op":"validate_write","entry":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` — **the raw value is never returned; a poisoned write never persists; the entry is bound to the writer's identity key** |
-| `validate_read` | `{"op":"validate_read","query":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — contents matching the query **AND** the reader's identity, joined and **PII-redacted on the way out**. An attested reader sees only its **exact** `spiffe_id`'s entries; an unattested/absent reader sees only **unbound** entries (never an identity-bound entry, never the whole store) |
+| `validate_write` | `{"op":"validate_write","entry":…,"identity":{"spiffe_id":…,"trust_tier":…,"scope"?:"shared"}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` — **the raw value is never returned; a poisoned write never persists; the entry is bound to the writer's identity key** (the reserved shared marker iff attested **and** `scope=="shared"`, else the writer's `spiffe_id` / the unbound marker) |
+| `validate_read` | `{"op":"validate_read","query":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — contents matching the query **AND** the reader's visible-key set, joined and **PII-redacted on the way out**. An attested reader sees its **exact** `spiffe_id`'s entries **plus shared-scope entries**; an unattested/absent reader sees **unbound** entries **plus shared-scope entries** (never an identity-bound entry, never the whole store). Scoping is a single store-side `ScanScoped` call (ADR-013) |
 | `verify_delete` | `{"op":"verify_delete","id":…}` | `{"confirmed":true,"residue_detected":bool,"residue_summary"?:…,"deletion_hash":…}` — fresh post-delete presence check **plus** a residue scan of the remaining store; `residue_summary` present only when `residue_detected:true`; `deletion_hash` is a deterministic SHA-256 of the deletion op |
 | *(other / malformed)* | any unparseable / unknown op | `{"error":{"code","message","retryable":false}}` (`bad_request` / `unknown_op`) |
 
@@ -90,8 +93,8 @@ same seam.
 type MemoryGuard struct { /* mu sync.Mutex; det Detector; store map[string]entry */ }
 
 func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard             // det == nil → default RegexDetector; omitted store → default InMemoryStore
-func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store BOUND TO the writer's Principal.Subject() (ADR-004); returns {allow, stored_id, flags}
-func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // substring scan → identity-scoped EXACT filter (attested Subject(), else unbound-only) → RedactPII; returns {allow, content_redacted, flags}
+func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store BOUND TO the writer's key (Principal.Subject(), or sharedScopeKey when attested + scope "shared") (ADR-004/ADR-013); returns {allow, stored_id, flags}
+func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // store-side ScanScoped over the reader's visible keys {Subject()|unbound, sharedScopeKey} → RedactPII; returns {allow, content_redacted, flags} (ADR-013)
 func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors across EVERY backing index/copy for residue; returns {confirmed, residue_detected, residue_summary?, deletion_hash}
 ```
 
@@ -155,13 +158,18 @@ func NewDetectorFromConfig(backend string) (Detector, error)   // config-driven 
 
 ```go
 type Principal interface {
-    Subject() string   // normalized identity key (the SPIFFE ID); "" if none — the EXACT match key
-    Attested() bool    // trust_tier == "attested"; isolation enforced ONLY when true
+    Subject() string     // normalized identity key (the SPIFFE ID); "" if none — the EXACT match key
+    Attested() bool      // trust_tier == "attested"; isolation enforced ONLY when true
+    SharedScope() bool   // scope == "shared"; HONORED only at write and only when Attested() (ADR-013)
 }
 
-type PreVerifiedPrincipal struct { /* spiffeID, trustTier string */ }   // v1 default: TRUSTS the caller-supplied {spiffe_id, trust_tier}
+type PreVerifiedPrincipal struct { /* spiffeID, trustTier, scope string */ }   // v1 default: TRUSTS the caller-supplied {spiffe_id, trust_tier, scope?}
 func (p PreVerifiedPrincipal) Subject() string
 func (p PreVerifiedPrincipal) Attested() bool
+func (p PreVerifiedPrincipal) SharedScope() bool
+
+// sharedScopeKey = "shared://" is the reserved boundIdentity marker for shared-scope entries.
+// boundKeyFor maps any Subject() equal to it → unbound, so no spiffe_id can forge the shared binding.
 ```
 
 - **The identity seam** (`principal.go`) isolates *how identity is obtained/verified* from *how it is
@@ -226,9 +234,11 @@ Three extension points exist, all seams behind stable interfaces:
 1. **`Detector` interface** (`detector.go`) — the detection backend (PII + injection). Two
    implementations ship: `RegexDetector` (v0 stand-in) and `NativeDetector` (Go-native in-process,
    ADR-002; the CLI/serve default). A Presidio-backed detector slots in additively behind this seam.
-2. **`MemoryStore` interface** (`store.go`) — the backing store. Two adapters ship: `InMemoryStore`
-   (the default single-map v0 backing) and `TwoIndexStore` (primary + secondary-content-index,
-   ADR-005). A real MemoryStore (LangChain / vector store / SQLite) slots in behind this seam.
+2. **`MemoryStore` interface** (`store.go`) — the backing store (`Put`/`Get`/`Delete`/`Scan`/`ScanScoped`/`All`/`AllByIndex`;
+   `ScanScoped` is the identity-scoped read verb, ADR-013). Three adapters ship: `InMemoryStore`
+   (the default single-map v0 backing), `TwoIndexStore` (primary + secondary-content-index, ADR-005),
+   and the persistent `FileStore` (JSONL snapshot, opt-in `MEMGUARD_STORE=file`, ADR-012). A real
+   MemoryStore (LangChain / vector store / SQLite) slots in behind this seam.
 3. **`AuditSink` interface** (`audit.go`) — the audit emission transport. Ships with a no-op default
    and test fakes; a real Unix-socket / HTTP / file transport slots in additively behind this seam
    once the audit-trail emit endpoint is confirmed (ADR-007).

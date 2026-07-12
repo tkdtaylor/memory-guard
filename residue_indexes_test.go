@@ -59,6 +59,18 @@ func (s *laggingCacheStore) Scan(query string) []entry {
 	}
 	return hits
 }
+
+// ScanScoped satisfies the MemoryStore seam (ADR-013); the residue suite drives this store
+// through VerifyDelete, not reads, so a straightforward primary-index filter suffices.
+func (s *laggingCacheStore) ScanScoped(query string, visibleKeys []string) []entry {
+	var hits []entry
+	for _, e := range s.primary {
+		if substringContains(e.content, query) && keyIn(e.boundIdentity, visibleKeys) {
+			hits = append(hits, e)
+		}
+	}
+	return hits
+}
 func (s *laggingCacheStore) All() []entry {
 	out := make([]entry, 0, len(s.primary))
 	for _, e := range s.primary {

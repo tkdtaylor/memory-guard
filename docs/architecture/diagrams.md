@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-07-12 (task 015: persistent file-backed `FileStore` as a third `MemoryStore` backing behind the unchanged seam; opt-in `MEMGUARD_STORE=file`; byte-level delete proof; ADR-012)
+**Last updated:** 2026-07-12 (task 016: store-side `ScanScoped` read verb + shared scope, ADR-013; task 015: persistent file-backed `FileStore` behind the unchanged seam, ADR-012)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -57,8 +57,8 @@ C4Component
     Container_Boundary(boundary, "memory-guard binary") {
         Component(main, "CLI", "main.go", "serve / write / read subcommands; parse --socket; print WriteResult/ReadResult JSON for the one-shot demos; exit 2 on a missing/unknown subcommand")
         Component(ipc, "IPC server", "ipc.go", "serve: remove stale socket, bind 0600 Unix socket, frame newline-delimited JSON, dispatch validate_write/validate_read/verify_delete/ping over a shared *MemoryGuard; structured error shape {error:{code,message,retryable}}")
-        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store.Put), ValidateRead (store.Scan → RedactPII), VerifyDelete (store.Delete → re-check absence via store.Get → scan store.AllByIndex() survivors across EVERY backing index/copy for residue, ADR-003/ADR-006: tiered normalized substring/phrase/token-overlap + number-word canonicalization, stdlib-only, returns confirmed/residue_detected/residue_summary? naming the index/deletion_hash)); talks to the store ONLY through the MemoryStore seam behind a sync.Mutex; mints opaque stored_id from crypto/rand")
-        Component(store, "MemoryStore seam", "store.go / store_file.go / store_config.go", "MemoryStore interface (Put / Get / Delete / Scan / All / AllByIndex) + 3 stdlib backings via NewStoreFromConfig (MEMGUARD_STORE): InMemoryStore (the default single map[string]entry; AllByIndex exposes one \"primary\" index), TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both; AllByIndex names each), and the persistent FileStore (0600 JSONL snapshot rewritten atomically per mutation, read-through-disk, byte-level delete proof; ADR-012). The boundary that isolates the storage backend; ADR-005/ADR-006/ADR-012")
+        Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store.Put), ValidateRead (store.ScanScoped over the reader's visible keys {Subject()|unbound, sharedScopeKey} → RedactPII; ADR-013), VerifyDelete (store.Delete → re-check absence via store.Get → scan store.AllByIndex() survivors across EVERY backing index/copy for residue, ADR-003/ADR-006: tiered normalized substring/phrase/token-overlap + number-word canonicalization, stdlib-only, returns confirmed/residue_detected/residue_summary? naming the index/deletion_hash)); talks to the store ONLY through the MemoryStore seam behind a sync.Mutex; mints opaque stored_id from crypto/rand")
+        Component(store, "MemoryStore seam", "store.go / store_file.go / store_config.go", "MemoryStore interface (Put / Get / Delete / Scan / ScanScoped / All / AllByIndex; ScanScoped is the identity-scoped read verb, ADR-013) + 3 stdlib backings via NewStoreFromConfig (MEMGUARD_STORE): InMemoryStore (the default single map[string]entry; AllByIndex exposes one \"primary\" index), TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both; AllByIndex names each), and the persistent FileStore (0600 JSONL snapshot rewritten atomically per mutation, read-through-disk, byte-level delete proof; ADR-012). The boundary that isolates the storage backend; ADR-005/ADR-006/ADR-012")
         Component(detector, "Detector seam", "detector.go / detector_config.go / detector_presidio.go", "Detector interface (RedactPII / DetectInjection) + 3 backends via NewDetectorFromConfig (MEMGUARD_DETECTOR): RegexDetector, Go-native NativeDetector (default, ADR-002), opt-in PresidioDetector (ADR-009: composite native-structured + Presidio NER, injection delegated to native UNCHANGED). The boundary that isolates the detection backend — no backend type leaks past it")
     }
 
@@ -71,7 +71,7 @@ C4Component
     Rel(ipc, guard, "dispatch op → ValidateWrite / ValidateRead / VerifyDelete")
     Rel(guard, detector, "DetectInjection (before store) + RedactPII (before store & on read)")
     Rel(detector, presidio, "analyze (only when MEMGUARD_DETECTOR=presidio)", "JSON / subprocess stdio")
-    Rel(guard, store, "Put / Get / Delete / Scan / All (only string/entry/[]entry cross the seam)")
+    Rel(guard, store, "Put / Get / Delete / Scan / ScanScoped / All / AllByIndex (only string/entry/[]entry cross the seam)")
 ```
 
 > **Two swap points — the `Detector` seam (ADR-001 §3) and the `MemoryStore` seam (ADR-005).** The v0
@@ -91,10 +91,11 @@ C4Component
   (`allow:false`, `stored_id:null`, nothing persists). A clean write is PII-redacted then stored, and
   an opaque `stored_id` (from `crypto/rand`) is returned — never the raw value (`guard.go::ValidateWrite`,
   ADR-001 §1).
-- `validate_read(query, identity) -> { allow, content_redacted, flags }` — scans the store for
-  substring hits, **filters them by identity** (an attested reader sees only its exact `Subject()`'s
-  entries; an unattested/absent reader sees only **unbound** entries — ADR-004), and returns the
-  survivors **PII-redacted** (defense in depth); v0 always `allow:true` (`guard.go::ValidateRead`).
+- `validate_read(query, identity) -> { allow, content_redacted, flags }` — a single store-side
+  `ScanScoped` over the reader's **visible-key set** (an attested reader sees its exact `Subject()`'s
+  entries **plus shared-scope** entries; an unattested/absent reader sees **unbound plus shared**
+  entries — ADR-004/ADR-013), and returns the survivors **PII-redacted** (defense in depth); v0 always
+  `allow:true` (`guard.go::ValidateRead`).
 - `verify_delete(id) -> { confirmed, residue_detected, residue_summary?, deletion_hash }` — deletes,
   **re-checks the store** to prove absence, then **scans the surviving entries across every backing
   index/copy** (`store.AllByIndex()`) for residue of the deleted content, naming the index it survives
@@ -141,11 +142,11 @@ sequenceDiagram
         end
     end
 
-    Note over Agent,Store: later — validate_read is identity-scoped, then redacts on the way out
+    Note over Agent,Store: later — validate_read is identity-scoped via ScanScoped (own + shared), then redacts on the way out
     Agent->>IPC: {"op":"validate_read","query":"contact","identity":{"spiffe_id":"…","trust_tier":"attested"}}
     IPC->>Guard: ValidateRead("contact", identity)
-    Guard->>Store: Scan(query) → entries containing the query
-    Note over Guard: keep only entries whose boundIdentity == reader's key (exact match, unattested/absent → unbound-only)
+    Note over Guard: derive visible keys (attested → Subject+shared, unattested/absent → unbound+shared)
+    Guard->>Store: ScanScoped(query, visibleKeys) → entries matching the query AND an exact visible key
     Guard->>Det: RedactPII(join(identity-scoped hits))
     Guard-->>IPC: { allow:true, content_redacted:"…<EMAIL>…", flags:(…) }
     IPC-->>Agent: { allow:true, content_redacted:"…", flags:(…) }

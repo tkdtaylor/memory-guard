@@ -29,6 +29,11 @@ type Principal interface {
 	// or absent principal hits the documented unbound-only fallback (REQ-005), never
 	// a silent return-everything — fail-closed w.r.t. bound entries.
 	Attested() bool
+	// SharedScope reports whether the principal requested the shared publish scope
+	// (identity field scope == "shared"). It is HONORED ONLY at write and ONLY when
+	// Attested() is true (ADR-013): an attested writer with SharedScope() binds the
+	// reserved shared marker; anything else binds normally. The read path ignores it.
+	SharedScope() bool
 }
 
 // attestedTier is the exact trust_tier value agent-mesh emits on a successful
@@ -36,12 +41,19 @@ type Principal interface {
 // other value (""/"unattested"/unknown) is treated as NOT attested (fail-closed).
 const attestedTier = "attested"
 
+// sharedScopeValue is the exact identity.scope REQUEST value that asks for the shared
+// publish scope. Any other value (""/unknown) is ignored (binds normally). This is the
+// wire request value; sharedScopeKey (below) is the reserved boundIdentity MARKER it maps
+// to — two distinct constants so the request vocabulary and the stored key never collide.
+const sharedScopeValue = "shared"
+
 // PreVerifiedPrincipal is the v1-default Principal (ADR-004 option 1): it TRUSTS
-// the caller-supplied, already-verified claim {spiffe_id, trust_tier}. It does NOT
-// parse certificates — verification stays agent-mesh's job upstream of the socket.
+// the caller-supplied, already-verified claim {spiffe_id, trust_tier, scope?}. It does
+// NOT parse certificates — verification stays agent-mesh's job upstream of the socket.
 type PreVerifiedPrincipal struct {
 	spiffeID  string // the normalized SPIFFE ID; the match key
 	trustTier string // "attested" when verified upstream; "" / "unattested" otherwise
+	scope     string // optional publish scope; "shared" (attested-only) or "" (normal)
 }
 
 // Subject returns the normalized SPIFFE ID (the match key).
@@ -49,6 +61,10 @@ func (p PreVerifiedPrincipal) Subject() string { return p.spiffeID }
 
 // Attested reports trust_tier == "attested".
 func (p PreVerifiedPrincipal) Attested() bool { return p.trustTier == attestedTier }
+
+// SharedScope reports scope == "shared". Whether it is honored is the guard's call
+// (boundKeyFor requires Attested() too); this accessor only reports the request.
+func (p PreVerifiedPrincipal) SharedScope() bool { return p.scope == sharedScopeValue }
 
 // principalFromMap parses the typed identity wire shape — {spiffe_id, trust_tier}
 // (ADR-004) — out of the free-form map carried on validate_*. A nil/empty map, or a
@@ -61,9 +77,11 @@ func (p PreVerifiedPrincipal) Attested() bool { return p.trustTier == attestedTi
 func principalFromMap(identity map[string]any) Principal {
 	spiffeID, _ := identity["spiffe_id"].(string)
 	trustTier, _ := identity["trust_tier"].(string)
+	scope, _ := identity["scope"].(string)
 	return PreVerifiedPrincipal{
 		spiffeID:  normalizeSubject(spiffeID),
 		trustTier: strings.TrimSpace(trustTier),
+		scope:     strings.TrimSpace(scope),
 	}
 }
 
@@ -83,14 +101,37 @@ func normalizeSubject(spiffeID string) string {
 // reads while NEVER exposing an identity-bound entry to an unattested reader.
 const unboundKey = ""
 
-// boundKeyFor maps a principal to the identity key an entry written under it carries.
-// An attested principal binds its Subject(); anything else binds the unbound marker.
-// This is the producer half of the producer→consumer identity contract (the write
-// site); scopedMatch is the consumer half (the read site) — both go through this
-// single derivation so the key bound at write is exactly the key matched at read.
+// sharedScopeKey is the reserved boundIdentity marker for an entry published to the
+// shared scope (ADR-013). It is deliberately NOT a valid spiffe:// URI so it cannot
+// collide with any real Subject(). An attested writer with scope "shared" binds this
+// key; every reader's visible-key set includes it, so shared entries are readable under
+// every identity class. It is FORGE-PROOF: boundKeyFor maps any Subject() equal to this
+// marker to the unbound key, so no spiffe_id value can reach the shared binding — only
+// an explicit attested scope:"shared" does.
+const sharedScopeKey = "shared://"
+
+// boundKeyFor maps a principal to the identity key an entry written under it carries:
+//   - a Subject() equal to the reserved sharedScopeKey is neutralized to "" FIRST
+//     (forge-proofing: no spiffe_id may masquerade as the shared marker);
+//   - an attested writer that requested scope "shared" binds sharedScopeKey;
+//   - an attested writer otherwise binds its Subject();
+//   - anything else (unattested/absent) binds the unbound marker.
+//
+// This is the producer half of the producer→consumer identity contract (the write site);
+// readerVisibilityKey + the guard's visible-key set is the consumer half (the read site).
 func boundKeyFor(p Principal) string {
-	if p != nil && p.Attested() && p.Subject() != "" {
-		return p.Subject()
+	if p == nil {
+		return unboundKey
+	}
+	subject := p.Subject()
+	if subject == sharedScopeKey {
+		subject = unboundKey // forge-proof: the marker can never be an identity key
+	}
+	if p.Attested() && p.SharedScope() {
+		return sharedScopeKey // attested-only shared publish (the sanctioned path)
+	}
+	if p.Attested() && subject != "" {
+		return subject
 	}
 	return unboundKey
 }

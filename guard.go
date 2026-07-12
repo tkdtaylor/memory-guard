@@ -118,28 +118,31 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 }
 
 // ValidateRead returns matching content for the READER'S identity, with PII redacted
-// (defense in depth). Identity is now LOAD-BEARING (ADR-004 / task 009): the whole-
-// store substring scan is REPLACED by an identity-scoped lookup.
+// (defense in depth). Identity is LOAD-BEARING (ADR-004 / task 009); the scoping is now
+// pushed into the store as a single ScanScoped call over the reader's visible-key set
+// (ADR-013), replacing the guard-side filter loop over Scan.
 //
-//   - An attested reader sees ONLY entries bound to its EXACT Subject() (no
-//     substring/fuzzy on the identity — "tenant-1" never matches "tenant-12").
-//   - An unattested or absent reader hits the unbound-only fallback (REQ-005): it
-//     sees ONLY entries written with no bound identity (public/system entries) —
-//     NEVER an identity-bound entry, NEVER the whole store. Fail-closed w.r.t. bound
-//     entries, and it keeps the v0 identity-less demo working.
+//   - An attested reader's visible keys are {Subject(), sharedScopeKey}: it sees ONLY
+//     entries bound to its EXACT Subject() plus shared-scope entries (no substring/fuzzy
+//     on the identity — "tenant-1" never matches "tenant-12").
+//   - An unattested or absent reader's visible keys are {unboundKey, sharedScopeKey}: it
+//     sees ONLY unbound (public/system) entries plus shared entries — NEVER an
+//     identity-bound entry, NEVER the whole store. Fail-closed w.r.t. bound entries, and
+//     it keeps the v0 identity-less demo working.
 //
-// Matching is guard-side orchestration through the Principal seam; PII redaction on
-// the scoped result set is unchanged, and no detector specifics enter the identity path.
+// Deriving the visible-key set is the only policy site; the store enforces exact
+// membership. PII redaction on the scoped result set is unchanged, and no detector
+// specifics enter the identity path. The read path ignores any scope on the identity.
 func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any {
 	wantKey, _ := readerVisibilityKey(principalFromMap(identity)) // consumer: the key matched at read
+	visibleKeys := []string{wantKey, sharedScopeKey}             // + shared: readable by every class
 	g.mu.Lock()
-	var hits []string
-	for _, e := range g.store.Scan(query) {
-		if e.boundIdentity == wantKey { // EXACT identity match — the isolation gate
-			hits = append(hits, e.content)
-		}
-	}
+	scoped := g.store.ScanScoped(query, visibleKeys) // store-side identity scoping (ADR-013)
 	g.mu.Unlock()
+	hits := make([]string, 0, len(scoped))
+	for _, e := range scoped {
+		hits = append(hits, e.content)
+	}
 	redacted, flags := g.det.RedactPII(strings.Join(hits, "\n"))
 	return map[string]any{"allow": true, "content_redacted": redacted,
 		"flags": flagsOrEmpty(flags)}

@@ -216,6 +216,20 @@ func (s *FileStore) Scan(query string) []entry {
 	return hits
 }
 
+// ScanScoped returns entries whose content contains query AND whose bound_identity is an
+// exact member of visibleKeys (ADR-013), read through to disk. Empty visibleKeys yields no
+// entries. This is what makes identity isolation a property of the PERSISTED data: an
+// independently constructed FileStore over the same path enforces the same visible-key set.
+func (s *FileStore) ScanScoped(query string, visibleKeys []string) []entry {
+	var hits []entry
+	for _, r := range s.load() {
+		if substringContains(r.Content, query) && keyIn(r.BoundIdentity, visibleKeys) {
+			hits = append(hits, r.toEntry())
+		}
+	}
+	return hits
+}
+
 // All returns every surviving entry as a non-nil (possibly empty) slice, read through disk.
 func (s *FileStore) All() []entry {
 	records := s.load()

@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 010 — audit-trail OCSF emission)
+**Last updated:** 2026-07-12 (task 016: store-side `ScanScoped` + shared scope + restart-surviving isolation, ADR-013)
 
 What the system does, observably — triggering condition, response, externally-visible side effects,
 failure modes. The "you can verify this from outside the process" view.
@@ -25,12 +25,16 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   **redacted** content is inserted into the in-memory store under that id **bound to the writer's
   identity**, and the guard returns `{ "allow": true, "stored_id": "mem-…", "flags": […] }`. `flags`
   carries the PII categories found (e.g. `pii:EMAIL`) as informational metadata.
-- **Identity binding (ADR-004):** the typed `identity` (`{spiffe_id, trust_tier}`) is decoded through
-  the `Principal` seam and the entry records a **normalized bound-identity key** — the writer's
-  `Subject()` (the SPIFFE ID) when the principal is **attested**, else the **unbound** marker. This key
-  is what `validate_read` matches against (B-002, B-008). A write with no attested identity binds the
-  unbound marker — **not** a wildcard that matches everyone. No SPIFFE/X.509 specifics enter the guard;
-  only `Principal` crosses the seam.
+- **Identity binding (ADR-004 / ADR-013):** the typed `identity` (`{spiffe_id, trust_tier, scope?}`) is
+  decoded through the `Principal` seam and the entry records a **normalized bound-identity key** — the
+  writer's `Subject()` (the SPIFFE ID) when the principal is **attested**, else the **unbound** marker.
+  A write that is **attested AND carries `scope == "shared"`** binds the reserved `sharedScopeKey`
+  instead (readable under every identity, B-008). An unattested writer requesting shared binds unbound
+  (no privilege escalation). This key is what `validate_read` matches against (B-002, B-008). A write
+  with no attested identity binds the unbound marker — **not** a wildcard that matches everyone. The
+  reserved marker is **forge-proof**: a `spiffe_id` equal to `sharedScopeKey` maps to unbound, so only
+  an explicit attested `scope:"shared"` reaches the shared binding. No SPIFFE/X.509 specifics enter the
+  guard; only `Principal` crosses the seam.
 - **Side effects:** on a clean write, mutates the in-memory store (with the **redacted** content +
   the bound-identity key + flags). On a rejected write, no store mutation.
 - **Failure modes:** a write flagged for poisoning never persists (the write-gate). The raw PII is
@@ -41,18 +45,24 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 
 - **Trigger:** `{"op":"validate_read","query":…,"identity":{…}}` over IPC, or
   `MemoryGuard.ValidateRead(query, identity)` in-process (the `read` CLI subcommand).
-- **Response:** the guard scans the store for entries whose content **contains the query substring**,
-  then **filters that set by identity** (B-008): it keeps only entries whose bound-identity key matches
-  the reader's visibility key (see below). It joins the surviving contents with newlines, runs
-  `Detector.RedactPII` over the joined result (defense in depth — PII redacted again on read), and
-  returns `{ "allow": true, "content_redacted": "…", "flags": […] }`. v0 always returns `allow:true`;
-  `flags` carries any PII categories the read-time redaction found.
-- **Identity scoping (ADR-004):** the reader's visibility key comes from the `Principal` seam:
-  - an **attested** reader sees **only** entries bound to its **exact** `Subject()` (no substring/fuzzy
-    on the identity — `tenant-1` never matches `tenant-12`);
-  - an **unattested or absent** reader sees **only** entries written with **no** bound identity
-    (the **unbound-only** fallback, REQ-005) — **never** an identity-bound entry, **never** the whole
-    store.
+- **Response:** the guard derives the reader's **visible-key set** and makes a single store-side
+  `ScanScoped(query, visibleKeys)` call (ADR-013): the store returns entries whose content **contains
+  the query substring** AND whose bound-identity key is an **exact member** of the visible-key set. It
+  joins the surviving contents with newlines, runs `Detector.RedactPII` over the joined result (defense
+  in depth — PII redacted again on read), and returns `{ "allow": true, "content_redacted": "…",
+  "flags": […] }`. v0 always returns `allow:true`; `flags` carries any PII categories the read-time
+  redaction found.
+- **Identity scoping (ADR-004 / ADR-013):** the reader's visible-key set comes from the `Principal`
+  seam plus the shared marker:
+  - an **attested** reader's keys are `{Subject(), sharedScopeKey}`: it sees entries bound to its
+    **exact** `Subject()` (no substring/fuzzy on the identity — `tenant-1` never matches `tenant-12`)
+    **plus** shared-scope entries;
+  - an **unattested or absent** reader's keys are `{unboundKey, sharedScopeKey}`: it sees entries
+    written with **no** bound identity **plus** shared-scope entries — **never** an identity-bound
+    entry, **never** the whole store.
+  - The scoping is now store-side (a single `ScanScoped` call), replacing the guard-side filter loop
+    over `Scan` (ADR-004's deferred durable-lookup item, realized at seam level). `scope` on a read
+    identity is ignored.
 - **Side effects:** none (read-only).
 - **Failure modes:** a query matching no entries — or no entries under the reader's identity — yields an
   empty `content_redacted` and an empty `flags`. A non-matching entry is **excluded entirely** (invisible,
@@ -144,22 +154,32 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 
 - **Trigger:** any `validate_read` carrying an `identity` (`{spiffe_id, trust_tier}`), against a store
   holding entries bound to different identities at write time (B-001).
-- **Response:** the read result is **scoped by identity** (ADR-004 / task 009): writer A's entry is
-  returned to a reader **only** when the reader is **attested** and its `Subject()` **exactly** matches
-  A's bound key. Writer A's entry is **never** returned to reader B — even when B's query substring
-  matches A's content **verbatim**. The isolation holds **because of identity**, not because the query
-  failed to match. An unattested/absent reader gets the **unbound-only** set (B-002) — only entries
-  written with no bound identity, never an identity-bound entry, never the whole store.
-- **Side effects:** none (read-only). Enforced via a guard-side **linear identity filter** over the
-  `MemoryStore` seam's `Scan` (the durable form is a per-identity index/partition behind the same seam —
-  ADR-004, deferred). Identity matching is guard-side orchestration through the `Principal` seam — **not**
-  a `Detector` concern; no detector backend specifics enter the identity path.
-- **Failure modes:** a forged or unverified (`trust_tier != "attested"`) identity matches **nothing**
-  bound — it falls to the unbound-only set, never through to the whole store (fail-closed w.r.t. bound
-  entries). PII redaction still runs on whatever the scoped set returns. *(Tests:
-  `TestNoCrossIdentityLeakage` (load-bearing), `TestReadReturnsOnlyMatchingIdentity`,
+- **Response:** the read result is **scoped by identity** (ADR-004 / task 009 / ADR-013): writer A's
+  entry is returned to a reader **only** when the reader is **attested** and its `Subject()` **exactly**
+  matches A's bound key. Writer A's entry is **never** returned to reader B — even when B's query
+  substring matches A's content **verbatim**. The isolation holds **because of identity**, not because
+  the query failed to match. An unattested/absent reader gets the **unbound + shared** set (B-002).
+  **Shared scope (ADR-013):** an attested writer may bind the reserved `sharedScopeKey` (`scope:"shared"`);
+  shared entries are readable under **every** identity class (attested tenants, unattested, absent), the
+  one cross-tenant channel. An unattested writer cannot publish shared (binds unbound), and no `spiffe_id`
+  can forge the marker.
+- **Side effects:** none (read-only). Enforced via a single store-side `ScanScoped(query, visibleKeys)`
+  call over the `MemoryStore` seam (ADR-013: the durable, store-side form of ADR-004's deferred scoped
+  lookup, replacing the guard-side linear filter over `Scan`). The reader's visible-key set is
+  `{Subject()|unboundKey, sharedScopeKey}`; deriving it is the only policy site, the store enforces exact
+  membership. **Durable:** over `FileStore` (task 015), an independently constructed guard on the same
+  path re-enforces the full matrix across a restart. Identity matching is guard-side orchestration
+  through the `Principal` seam — **not** a `Detector` concern; no detector backend specifics enter the
+  identity path.
+- **Failure modes:** a forged or unverified (`trust_tier != "attested"`) identity matches **no**
+  identity-bound entry — it falls to the unbound + shared set, never through to the whole store
+  (fail-closed w.r.t. bound entries). PII redaction still runs on whatever the scoped set returns.
+  *(Tests: `TestNoCrossIdentityLeakage` (load-bearing), `TestReadReturnsOnlyMatchingIdentity`,
   `TestWriteBindsVerifiableIdentity`, `TestIdentityScopedLookupReplacesWholeStoreScan`,
-  `TestNoIdentityReadIsUnboundOnly`, `TestPrincipalSeamSemantics`; L6 over a live `serve` socket.)*
+  `TestNoIdentityReadIsUnboundOnly`, `TestPrincipalSeamSemantics`; task 016:
+  `TestScanScopedExactMembershipPerAdapter`, `TestValidateReadUsesScanScoped`,
+  `TestSharedScopeVisibilityMatrix`, `TestSharedMarkerCannotBeForged`,
+  `TestDurableIsolationSurvivesRestart`; L6 over a live `serve` socket, restart-surviving.)*
 
 ---
 
