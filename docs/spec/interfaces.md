@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-07-12 (task 016: `ScanScoped` seam verb + optional identity `scope` (shared publish), ADR-013)
+**Last updated:** 2026-07-12 (task 017: real `AuditTrailSink` transport + `serve --audit-socket` wiring, ADR-014; task 016: `ScanScoped` + identity `scope`, ADR-013)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -68,15 +68,21 @@ in-guard SVID/X.509 verification (deferred behind the `Principal` seam).
 ## Outbound interfaces
 
 memory-guard makes **no outbound network calls** in the default (disabled) configuration. When audit
-emission is **enabled** (via `AuditConfig.Enabled=true` + a non-nil `AuditSink`), memory-guard emits
-**OCSF-shaped events** for each detection to the configured `AuditSink` — the transport (Unix socket,
-HTTP, file) lives entirely in the `AuditSink` implementor, never in `guard.go` or `ipc.go`. See
-[B-009](behaviors.md#b-009) and [ADR-007](../architecture/decisions/007-audit-ocsf-emission.md).
+emission is **enabled** (opt-in via `serve --audit-socket <path>` / `MEMGUARD_AUDIT_SOCKET`),
+memory-guard emits one event per detection to the sibling **audit-trail** block over a Unix socket. The
+real transport is `AuditTrailSink` (`audit_trail_sink.go`, ADR-014): per event, dial → write
+`{"op":"emit","event":{ts, actor, action, target, decision?, refs[], context?}}` → read `{seq, hash}`
+→ close. The internal `OCSFEvent` is translated to that **plain** wire shape at the sink boundary
+(`mapToAuditTrailEvent`); the transport lives entirely in the sink file, never in `guard.go` or
+`ipc.go`. Deletion events deliver `deletion_hash` as a `refs` entry (its first consumer). See
+[B-009](behaviors.md#b-009), [ADR-007](../architecture/decisions/007-audit-ocsf-emission.md), and
+[ADR-014](../architecture/decisions/014-audit-trail-wire-reconciliation.md).
 
-Emission is **default-DISABLED** (pending confirmation of the sibling audit-trail's emit endpoint),
-**best-effort** (fail-open — a down/slow/absent sink never blocks the hot path or changes a verdict),
-and **PII-safe** (no raw PII in any emitted event). The `AuditSink` seam (`audit.go`) is the extension
-point; swapping the transport is a one-implementation change with zero guard/IPC/contract impact.
+Emission is **default-OFF** (opt-in), **best-effort** (fail-open — a down/slow/absent/erroring sink
+never blocks the hot path or changes a verdict; wrapped in `AsyncSink` for non-blocking dispatch), and
+**PII-safe** (no raw PII or content in any emitted event; every wire number is an int). The `AuditSink`
+seam (`audit.go`) is the extension point; swapping the transport is a one-implementation change with
+zero guard/IPC/contract impact.
 
 The Presidio-backed `Detector` (v1, ADR-009, opt-in via `MEMGUARD_DETECTOR=presidio`) calls out to a
 Python **sidecar** subprocess over stdlib JSON IPC — that call lives **behind the `Detector`
@@ -198,7 +204,14 @@ type AuditConfig struct {
 
 func (g *MemoryGuard) WithAudit(cfg AuditConfig) *MemoryGuard  // builder: injects the sink; returns a new guard
 
-// Provided implementations:
+// The REAL transport (task 017 / ADR-014): speaks the audit-trail plain-event wire contract.
+type AuditTrailSink struct{ /* socketPath string; timeout time.Duration */ }
+func NewAuditTrailSink(socketPath string, timeout time.Duration) *AuditTrailSink
+func mapToAuditTrailEvent(e OCSFEvent) map[string]any  // pure OCSFEvent → {ts,actor,action,target,decision?,refs[],context?}
+func buildAuditConfig(socketPath string) AuditConfig   // "" → disabled; else AsyncSink-wrapped AuditTrailSink
+func resolveAuditSocket(flagVal, envVal string) string // --audit-socket wins over MEMGUARD_AUDIT_SOCKET
+
+// Test implementations:
 type NoOpSink struct{}        // zero-cost no-op (default when disabled)
 type CollectingSink struct{}  // thread-safe in-memory capture for tests
 type FailingSink struct{}     // always returns error (proves fail-open in tests)
@@ -239,9 +252,10 @@ Three extension points exist, all seams behind stable interfaces:
    (the default single-map v0 backing), `TwoIndexStore` (primary + secondary-content-index, ADR-005),
    and the persistent `FileStore` (JSONL snapshot, opt-in `MEMGUARD_STORE=file`, ADR-012). A real
    MemoryStore (LangChain / vector store / SQLite) slots in behind this seam.
-3. **`AuditSink` interface** (`audit.go`) — the audit emission transport. Ships with a no-op default
-   and test fakes; a real Unix-socket / HTTP / file transport slots in additively behind this seam
-   once the audit-trail emit endpoint is confirmed (ADR-007).
+3. **`AuditSink` interface** (`audit.go`) — the audit emission transport. Ships with a no-op default,
+   test fakes, and the real `AuditTrailSink` (`audit_trail_sink.go`, ADR-014) speaking the confirmed
+   audit-trail Unix-socket emit contract, opt-in via `serve --audit-socket`. Any other transport
+   (HTTP / file) slots in additively behind this seam.
 
 There is no plugin registry; extension is by source modification behind each seam. A new implementation
 of any seam requires zero changes to `guard.go`, `ipc.go`, `main.go`, or the wire contract.
