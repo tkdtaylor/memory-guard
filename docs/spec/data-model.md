@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-07-12 (task 015: persistent `FileStore` backing + persisted store record, ADR-012)
+**Last updated:** 2026-07-12 (task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -90,10 +90,12 @@ type entry struct {
   representation of a memory record the store keeps. The raw (pre-redaction) value is **never** present
   at rest.
 - **`boundIdentity` is set ONLY in `ValidateWrite`** (via `boundKeyFor(principalFromMap(identity))`) and
-  read ONLY in `ValidateRead`'s identity filter — one write site, one read site, one derivation, so the
-  key bound at write is exactly the key matched at read (ADR-004). An attested writer binds its
-  `Subject()` (the SPIFFE ID); an unattested/absent writer binds the **unbound** marker (`""`) — **not**
-  a wildcard. The typed identity wire shape (`{spiffe_id, trust_tier}`) is decoded into a `Principal` at
+  read ONLY in `ValidateRead`'s store-side `ScanScoped` — one write site, one read site, one derivation,
+  so the key bound at write is exactly the key matched at read (ADR-004 / ADR-013). An attested writer
+  binds its `Subject()` (the SPIFFE ID), or the reserved `sharedScopeKey` (`"shared://"`) when it
+  requested `scope:"shared"`; an unattested/absent writer binds the **unbound** marker (`""`) — **not**
+  a wildcard. The reserved marker is forge-proof: a `Subject()` equal to `"shared://"` maps to unbound.
+  The typed identity wire shape (`{spiffe_id, trust_tier, scope?}`) is decoded into a `Principal` at
   the IPC boundary and never stored as a raw map; only the normalized key persists.
 
 ### Seam: `MemoryStore` (the storage backend) and its two stdlib adapters
@@ -108,7 +110,8 @@ type entry struct {
       Put(id string, e entry)        // store/overwrite the REDACTED entry (only after the write-gate clears)
       Get(id string) (entry, bool)   // the post-delete absence proof; unknown id → (zero, false)
       Delete(id string)              // remove id from EVERY backing index/copy; idempotent
-      Scan(query string) []entry     // substring match for validate_read; any order
+      Scan(query string) []entry     // substring match; any order
+      ScanScoped(query string, visibleKeys []string) []entry // substring AND exact-membership on boundIdentity; the validate_read path (ADR-013)
       All() []entry                  // every survivor (primary), non-nil
       AllByIndex() map[string][]entry // survivors grouped by backing-index NAME; the residue scan iterates this across EVERY index/copy (ADR-006)
   }
@@ -329,13 +332,18 @@ All current errors are `retryable:false`. Codes:
 - **`deletion_hash` is deterministic.** It is a pure function (SHA-256) of the deletion op (`id` +
   deleted content) — reproducible across runs and processes, with no randomness.
 - **Each entry carries exactly one bound-identity key, set at write and matched exactly at read.**
-  `boundIdentity` is written only by `ValidateWrite` and read only by `ValidateRead`'s identity filter;
-  matching is **exact** on the normalized key (no substring/fuzzy — `tenant-1` never matches
-  `tenant-12`). An unattested/absent principal binds and matches the **unbound** marker only — it never
-  reaches an identity-bound entry (fail-closed w.r.t. bound entries).
+  `boundIdentity` is written only by `ValidateWrite` and read only by `ValidateRead`'s store-side
+  `ScanScoped` over the reader's visible-key set; matching is **exact** on the normalized key (no
+  substring/fuzzy — `tenant-1` never matches `tenant-12`). An unattested/absent principal binds and
+  matches the **unbound + shared** set only — it never reaches an identity-bound entry (fail-closed
+  w.r.t. bound entries).
+- **Shared scope is attested-only and forge-proof (ADR-013).** The reserved `sharedScopeKey`
+  (`"shared://"`) is bound only by an attested writer that requested `scope:"shared"`; every reader's
+  visible-key set includes it, so shared entries are readable under every identity class. No `spiffe_id`
+  can forge the marker: a `Subject()` equal to `"shared://"` maps to the unbound key.
 - **No identity-backend-specific type crosses the wire or the store.** `identity` is plain JSON
-  (`{spiffe_id, trust_tier}`) decoded into a `Principal` at the boundary; no SPIFFE/X.509/Ed25519 type
-  enters `guard.go`, `ipc.go`, or the stored `entry` — only the normalized key persists (ADR-004).
+  (`{spiffe_id, trust_tier, scope?}`) decoded into a `Principal` at the boundary; no SPIFFE/X.509/Ed25519
+  type enters `guard.go`, `ipc.go`, or the stored `entry` — only the normalized key persists (ADR-004).
 - **No detector-backend-specific type crosses the wire** — the contract is plain JSON
   (`allow`/`stored_id`/`content_redacted`/`flags`/`confirmed`), so a future detection backend
   (Presidio / ONNX / NER) slots in behind the `Detector` interface unchanged.

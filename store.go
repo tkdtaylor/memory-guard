@@ -38,6 +38,14 @@ type MemoryStore interface {
 	// Scan returns every entry whose content contains query (substring match), in
 	// any order. Callers compare on content membership, not slice order.
 	Scan(query string) []entry
+	// ScanScoped returns every entry whose content contains query AND whose
+	// boundIdentity is an EXACT member of visibleKeys (ADR-013). Membership is exact
+	// string equality — no substring/fuzzy on keys ("tenant-1" never matches
+	// "tenant-12"). An empty visibleKeys returns no entries (never a fallback to the
+	// unscoped store). This is the store-side identity scoping the read path uses,
+	// replacing the guard-side filter over Scan; the guard supplies the reader's
+	// visible-key set and never sees a bound key it may not.
+	ScanScoped(query string, visibleKeys []string) []entry
 	// All returns every surviving entry, in any order, as a non-nil (possibly
 	// empty) slice so the residue scan iterates cleanly over an empty store.
 	All() []entry
@@ -86,6 +94,16 @@ func (s InMemoryStore) Scan(query string) []entry {
 	var hits []entry
 	for _, e := range s {
 		if substringContains(e.content, query) {
+			hits = append(hits, e)
+		}
+	}
+	return hits
+}
+
+func (s InMemoryStore) ScanScoped(query string, visibleKeys []string) []entry {
+	var hits []entry
+	for _, e := range s {
+		if substringContains(e.content, query) && keyIn(e.boundIdentity, visibleKeys) {
 			hits = append(hits, e)
 		}
 	}
@@ -191,6 +209,16 @@ func (s *TwoIndexStore) Scan(query string) []entry {
 	return hits
 }
 
+func (s *TwoIndexStore) ScanScoped(query string, visibleKeys []string) []entry {
+	var hits []entry
+	for _, e := range s.primary {
+		if substringContains(e.content, query) && keyIn(e.boundIdentity, visibleKeys) {
+			hits = append(hits, e)
+		}
+	}
+	return hits
+}
+
 func (s *TwoIndexStore) All() []entry {
 	out := make([]entry, 0, len(s.primary))
 	for _, e := range s.primary {
@@ -230,6 +258,19 @@ func (s *TwoIndexStore) AllByIndex() map[string][]entry {
 		primaryIndexName:          s.All(),
 		"secondary-content-index": secondary,
 	}
+}
+
+// keyIn reports whether key is an EXACT member of keys (the store-side membership test
+// ScanScoped uses for identity scoping, ADR-013). Exact string equality only, no
+// substring/fuzzy — an empty keys slice returns false for every key (so ScanScoped with
+// no visible keys yields no entries, never a fallback to the unscoped store).
+func keyIn(key string, keys []string) bool {
+	for _, k := range keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 // substringContains is the store-side substring predicate Scan uses. It is a thin alias
