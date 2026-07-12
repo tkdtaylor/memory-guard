@@ -145,8 +145,8 @@ sequenceDiagram
     Note over Agent,Store: later — validate_read is identity-scoped via ScanScoped (own + shared), then redacts on the way out
     Agent->>IPC: {"op":"validate_read","query":"contact","identity":{"spiffe_id":"…","trust_tier":"attested"}}
     IPC->>Guard: ValidateRead("contact", identity)
-    Guard->>Store: Scan(query) → entries containing the query
-    Note over Guard: keep only entries whose boundIdentity == reader's key (exact match, unattested/absent → unbound-only)
+    Note over Guard: derive visible keys (attested → Subject+shared, unattested/absent → unbound+shared)
+    Guard->>Store: ScanScoped(query, visibleKeys) → entries matching the query AND an exact visible key
     Guard->>Det: RedactPII(join(identity-scoped hits))
     Guard-->>IPC: { allow:true, content_redacted:"…<EMAIL>…", flags:(…) }
     IPC-->>Agent: { allow:true, content_redacted:"…", flags:(…) }
