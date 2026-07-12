@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-06-24 (task 007 — Presidio detector backend as an opt-in out-of-process Python sidecar behind the unchanged `Detector` seam; composite native-structured + Presidio NER; injection unchanged; ADR-009)
+**Last updated:** 2026-07-12 (task 015: persistent file-backed `FileStore` as a third `MemoryStore` backing behind the unchanged seam; opt-in `MEMGUARD_STORE=file`; byte-level delete proof; ADR-012)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -12,8 +12,8 @@ invalidate the change or the diagram; one must be updated to match the other in 
 
 > memory-guard is a single deployable binary that gates the agent's memory I/O. It has **two**
 > load-bearing internal boundaries: the `Detector` seam (detection backend) and the `MemoryStore` seam
-> (the storage backend — ADR-005, a single in-memory map or a multi-index store, swapped one-line
-> behind the verbs). Its external integrations are the agent core (the three
+> (the storage backend — ADR-005, a single in-memory map, a multi-index store, or the persistent
+> file-backed `FileStore` (ADR-012), swapped one-line behind the verbs). Its external integrations are the agent core (the three
 > `validate_*`/`verify_delete` verbs) and `audit-trail` (detection events, v1 — not wired in v0).
 > Container and Component collapse into one diagram.
 
@@ -29,7 +29,7 @@ C4Context
     System(memguard, "memory-guard", "Agent memory-I/O gate (ASI06): write-gate + PII redaction + post-deletion verification")
     Person(operator, "Operator", "Runs the daemon / the write|read demo")
 
-    System_Ext(store, "Memory store", "The backing MemoryStore behind the seam (ADR-005); ships as a stdlib in-memory map or a multi-index store; a LangChain / LlamaIndex / SQLite / vector backend slots in behind the same verbs")
+    System_Ext(store, "Memory store", "The backing MemoryStore behind the seam (ADR-005); ships as a stdlib in-memory map, a multi-index store, or the persistent file-backed FileStore (opt-in MEMGUARD_STORE=file, ADR-012); a LangChain / LlamaIndex / SQLite / vector backend slots in behind the same verbs")
     System_Ext(audit, "audit-trail", "Receives detection events (OCSF) — v1; not wired in v0")
     System_Ext(armor, "armor", "Guards the tool-call / web-ingestion path; memory-guard guards what gets STORED")
 
@@ -58,7 +58,7 @@ C4Component
         Component(main, "CLI", "main.go", "serve / write / read subcommands; parse --socket; print WriteResult/ReadResult JSON for the one-shot demos; exit 2 on a missing/unknown subcommand")
         Component(ipc, "IPC server", "ipc.go", "serve: remove stale socket, bind 0600 Unix socket, frame newline-delimited JSON, dispatch validate_write/validate_read/verify_delete/ping over a shared *MemoryGuard; structured error shape {error:{code,message,retryable}}")
         Component(guard, "MemoryGuard core", "guard.go", "ValidateWrite (write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store.Put), ValidateRead (store.Scan → RedactPII), VerifyDelete (store.Delete → re-check absence via store.Get → scan store.AllByIndex() survivors across EVERY backing index/copy for residue, ADR-003/ADR-006: tiered normalized substring/phrase/token-overlap + number-word canonicalization, stdlib-only, returns confirmed/residue_detected/residue_summary? naming the index/deletion_hash)); talks to the store ONLY through the MemoryStore seam behind a sync.Mutex; mints opaque stored_id from crypto/rand")
-        Component(store, "MemoryStore seam", "store.go", "MemoryStore interface (Put / Get / Delete / Scan / All / AllByIndex) + two stdlib backings: InMemoryStore (the default single map[string]entry; AllByIndex exposes one \"primary\" index) and TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both; AllByIndex names each). The boundary that isolates the storage backend; ADR-005/ADR-006")
+        Component(store, "MemoryStore seam", "store.go / store_file.go / store_config.go", "MemoryStore interface (Put / Get / Delete / Scan / All / AllByIndex) + 3 stdlib backings via NewStoreFromConfig (MEMGUARD_STORE): InMemoryStore (the default single map[string]entry; AllByIndex exposes one \"primary\" index), TwoIndexStore (primary id→entry map PLUS a secondary content→ids index; Delete purges both; AllByIndex names each), and the persistent FileStore (0600 JSONL snapshot rewritten atomically per mutation, read-through-disk, byte-level delete proof; ADR-012). The boundary that isolates the storage backend; ADR-005/ADR-006/ADR-012")
         Component(detector, "Detector seam", "detector.go / detector_config.go / detector_presidio.go", "Detector interface (RedactPII / DetectInjection) + 3 backends via NewDetectorFromConfig (MEMGUARD_DETECTOR): RegexDetector, Go-native NativeDetector (default, ADR-002), opt-in PresidioDetector (ADR-009: composite native-structured + Presidio NER, injection delegated to native UNCHANGED). The boundary that isolates the detection backend — no backend type leaks past it")
     }
 

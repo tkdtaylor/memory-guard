@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 009 — entry bound-identity key + typed identity)
+**Last updated:** 2026-07-12 (task 015: persistent `FileStore` backing + persisted store record, ADR-012)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -17,11 +17,34 @@ Not here: operations ([behaviors.md](behaviors.md)), how data is accessed
 
 ## Persistent state
 
-**None.** memory-guard holds no database and no files beyond the transient Unix socket it binds. Both
-shipped `MemoryStore` backings (`InMemoryStore`, `TwoIndexStore`) are in-memory and lost on restart. A
-persistent or third-party backend — LangChain / LlamaIndex / SQLite / vector store — slots in behind
-the **unchanged `MemoryStore` seam** (`store.go`, ADR-005) with no guard/IPC/contract change; that is
-deferred, not foreclosed.
+**Opt-in, one file.** By default (`MEMGUARD_STORE=memory`) memory-guard holds no database and no files
+beyond the transient Unix socket it binds; the default `InMemoryStore` and `TwoIndexStore` backings are
+in-memory and lost on restart. When `MEMGUARD_STORE=file` (`FileStore`, ADR-012) the store is **one
+JSONL snapshot file** at `MEMGUARD_STORE_PATH`, mode `0600`, rewritten atomically on every mutation
+(temp file + fsync + `os.Rename`) so a delete physically removes the deleted entry's bytes. This is the
+first persistent backing, and it makes `verify_delete`'s absence proof and the residue scan a claim
+about disk-backed state rather than a map. It slots in behind the **unchanged `MemoryStore` seam**
+(`store.go`, ADR-005) with no guard/IPC/contract change. A third-party backend (LangChain / LlamaIndex
+/ SQLite / vector store) would slot in the same way; that remains deferred, not foreclosed.
+
+### Format: persisted store record (`FileStore`, internal to `store_file.go`)
+
+One JSON object per line; never crosses the `MemoryStore` seam. All three `entry` fields round-trip
+(`bound_identity` is the load-bearing isolation key, task 016 depends on it persisting):
+
+```jsonc
+{"id": "mem-a1b2c3", "content": "<redacted content>", "bound_identity": "spiffe://…|\"\"", "flags": ["pii:EMAIL"]}
+```
+
+- **`id`**: the opaque `mem-<hex>` stored id; a record with an empty/absent `id` is a construction
+  error (fail-closed, never a zero-value entry).
+- **`content`**: the **redacted** content (raw PII never lands on disk; a poisoned write never reaches
+  disk at all).
+- **`bound_identity`**: the normalized identity key (`""` for an unbound/unattested writer).
+- **`flags`**: the PII/injection metadata (`null`/absent round-trips as nil).
+
+A file that is missing or empty is a valid empty store; an unparseable line is a construction error and
+the file is left untouched.
 
 ---
 
@@ -39,12 +62,15 @@ deferred, not foreclosed.
 - **Owner:** the `MemoryGuard` value (`guard.go`), shared by the IPC server across connections. The
   guard reaches the store **only** through the seam verbs — `Put` (clean write), `Scan` (read), `Get`
   (the post-delete absence proof), `Delete`, and `All` (the residue-scan survivors).
-- **Backing:** the default `InMemoryStore` (a single `map[string]entry`) when no store is supplied;
-  `TwoIndexStore` (a primary `id → entry` map plus a secondary `content → ids` index) when wired
-  explicitly. Both are stdlib-only (ADR-005).
-- **Lifetime:** process lifetime; populated by `ValidateWrite` (clean writes only — a poisoned write
-  calls **no** `Put` and stores nothing), entries removed by `VerifyDelete` (which `Delete`s from
-  **every** backing index). Nothing persists across a restart.
+- **Backing:** the default `InMemoryStore` (a single `map[string]entry`); `TwoIndexStore` (a primary
+  `id → entry` map plus a secondary `content → ids` index); or the persistent `FileStore` (a JSONL
+  snapshot on disk, opt-in via `MEMGUARD_STORE=file`, ADR-012). All three are stdlib-only, selected
+  through `NewStoreFromConfig` (ADR-005, ADR-012).
+- **Lifetime:** populated by `ValidateWrite` (clean writes only — a poisoned write calls **no** `Put`
+  and stores nothing), entries removed by `VerifyDelete` (which `Delete`s from **every** backing
+  index). With the in-memory backings, state is process lifetime and nothing persists across a restart;
+  with `FileStore` the state lives in the on-disk JSONL snapshot and **survives a restart** (an
+  independently constructed store on the same path sees the persisted entries).
 - **Concurrency rules:** the whole store is guarded by `MemoryGuard.mu` (`sync.Mutex`); each operation
   locks it for the duration of its store access. A multi-index backing keeps its indexes consistent
   across the verbs within that lock.
@@ -105,7 +131,17 @@ type entry struct {
   in the second index. This is the smallest store that makes "residue absent from **every**
   index/copy" (task 008) a concrete claim. Stdlib-only — `go.mod` stays require-free (ADR-005,
   REQ-006). The guard-behavior suite (`TestGuardBehaviorParityAcrossStores`,
-  `TestInvariantsThroughSeam`) runs identically against both backings, proving the seam behaviorally.
+  `TestInvariantsThroughSeam`) runs identically against all backings, proving the seam behaviorally.
+
+- **`FileStore`** (`store_file.go`, ADR-012): the first **persistent** backing, opt-in via
+  `MEMGUARD_STORE=file`. A single JSONL snapshot at `MEMGUARD_STORE_PATH`, rewritten atomically on
+  every mutation (temp file + fsync + `os.Rename`, mode `0600`) and read through to disk on every verb
+  (no in-memory cache). A `Delete` physically removes the deleted entry's bytes, so `verify_delete`'s
+  absence proof and the residue scan run against real persistence and survive a restart. All three
+  `entry` fields (`content`, `boundIdentity`, `flags`) round-trip through the persisted record above.
+  Corruption at construction is a fail-closed error (the file is left untouched); a runtime I/O failure
+  panics (fail fast). Stdlib-only — `go.mod` stays require-free. Selected through the
+  `NewStoreFromConfig` factory (`store_config.go`), mirroring the `Detector` config pattern.
 
 ### Seam: `Detector` (the detection backend) and `RegexDetector` (the v0 implementation)
 

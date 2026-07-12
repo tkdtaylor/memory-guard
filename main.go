@@ -49,6 +49,32 @@ func buildDetector() Detector {
 	return det
 }
 
+// storeBackend returns the configured store backend NAME, defaulting to the ephemeral
+// in-memory map (ADR-012). Selection is via MEMGUARD_STORE ("memory" | "file"); the actual
+// store object is built by the generic NewStoreFromConfig factory (store_config.go) so this
+// file names only a backend STRING — no store Go type appears here, keeping the seam gate clean.
+func storeBackend() string {
+	if b := os.Getenv("MEMGUARD_STORE"); b != "" {
+		return b
+	}
+	return StoreMemory
+}
+
+// storePath returns the configured store path (MEMGUARD_STORE_PATH), required when the
+// backend is "file". Empty for the in-memory default.
+func storePath() string { return os.Getenv("MEMGUARD_STORE_PATH") }
+
+// buildStore constructs the configured store behind the seam, exiting 2 on a config error
+// (unknown backend, or file without a path — fail-closed, never a silent fallback).
+func buildStore() MemoryStore {
+	store, err := NewStoreFromConfig(storeBackend(), storePath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "store:", err)
+		os.Exit(2)
+	}
+	return store
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: memory-guard <serve|write|read> …")
@@ -63,16 +89,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, "serve: --socket is required")
 			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s)\n", *socket, detectorBackend())
-		if err := serve(*socket, NewMemoryGuard(buildDetector())); err != nil {
+		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s, store: %s)\n",
+			*socket, detectorBackend(), storeBackend())
+		if err := serve(*socket, NewMemoryGuard(buildDetector(), buildStore())); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
 	case "write":
-		g := NewMemoryGuard(buildDetector())
+		g := NewMemoryGuard(buildDetector(), buildStore())
 		printJSON(g.ValidateWrite(arg(2), nil))
 	case "read":
-		g := NewMemoryGuard(buildDetector())
+		g := NewMemoryGuard(buildDetector(), buildStore())
 		g.ValidateWrite(arg(2), nil) // seed so the one-shot demo has something to read
 		printJSON(g.ValidateRead(arg(2), nil))
 	default:

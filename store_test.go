@@ -3,6 +3,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -19,10 +20,19 @@ import (
 // allStores returns the MemoryStore backings behind the seam: the default in-memory map and the
 // second multi-index adapter (TwoIndexStore — primary map + secondary content index). Tests that
 // must hold for ANY backing range over this map, asserting identical guard behavior.
-func allStores() map[string]func() MemoryStore {
+func allStores(t *testing.T) map[string]func() MemoryStore {
 	return map[string]func() MemoryStore{
 		"InMemoryStore": func() MemoryStore { return NewInMemoryStore() },
 		"TwoIndexStore": func() MemoryStore { return NewTwoIndexStore() },
+		// FileStore (ADR-012): each factory call gets a FRESH temp path (t.TempDir() is
+		// unique per call), so multiple stores within one subtest never share a file.
+		"FileStore": func() MemoryStore {
+			s, err := NewFileStore(filepath.Join(t.TempDir(), "store.jsonl"))
+			if err != nil {
+				t.Fatalf("NewFileStore: %v", err)
+			}
+			return s
+		},
 	}
 }
 
@@ -35,7 +45,7 @@ func TestMemoryStoreSeamVerbs(t *testing.T) {
 
 	// The guard holds a MemoryStore (interface), not a map — proven by being able to construct it
 	// with EITHER backing through the one-line swap.
-	for name, mk := range allStores() {
+	for name, mk := range allStores(t) {
 		mk := mk
 		t.Run(name, func(t *testing.T) {
 			s := mk()
@@ -83,7 +93,7 @@ func TestMemoryStoreSeamVerbs(t *testing.T) {
 // demands identical outcomes — clean write, PII write, poisoned write (fail-closed), read, and
 // delete-with-residue. This asserts behavioral parity, NOT merely that a second store compiles.
 func TestGuardBehaviorParityAcrossStores(t *testing.T) {
-	for name, mk := range allStores() {
+	for name, mk := range allStores(t) {
 		mk := mk
 		t.Run(name, func(t *testing.T) {
 			g := NewMemoryGuard(NewNativeDetector(), mk())
@@ -158,7 +168,7 @@ func TestGuardBehaviorParityAcrossStores(t *testing.T) {
 // ---- TC-005: load-bearing invariants preserved through the seam, against BOTH stores ----------
 
 func TestInvariantsThroughSeam(t *testing.T) {
-	for name, mk := range allStores() {
+	for name, mk := range allStores(t) {
 		mk := mk
 		t.Run(name, func(t *testing.T) {
 			// (a) fail-closed: an injection-flagged write calls NO Put — the store stays untouched.
@@ -228,7 +238,7 @@ func TestErrorShapeUnchanged(t *testing.T) {
 // ONLY in store.go. This guards the architectural invariant the way the Detector-seam tests do.
 func TestNoStoreBackendLeak(t *testing.T) {
 	// Backend-specific identifiers that must NOT appear outside store.go / store_test.go.
-	banned := []string{"TwoIndexStore", "byContent", "primary"}
+	banned := []string{"TwoIndexStore", "byContent", "primary", "FileStore", "fileRecord"}
 	files := []string{"guard.go", "ipc.go", "main.go", "docs/CONTRACT.md"}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
