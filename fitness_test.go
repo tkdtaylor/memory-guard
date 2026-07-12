@@ -313,6 +313,8 @@ var seamBannedDetectorTokens = []string{
 var seamBannedStoreTokens = []string{
 	"TwoIndexStore", // concrete store type must not appear in guard/IPC/contract
 	"byContent",     // secondary-index field of TwoIndexStore
+	"FileStore",     // concrete file-backed store type (ADR-012) must stay behind the seam
+	"fileRecord",    // on-disk wire-record type of FileStore
 	// Note: "primary" is too generic (word appears in prose); skip it.
 }
 

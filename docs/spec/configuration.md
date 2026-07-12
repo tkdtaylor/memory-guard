@@ -1,7 +1,7 @@
 # Configuration
 
 **Project:** memory-guard
-**Last updated:** 2026-06-24 (task 007 — Presidio detector backend selection + pinned sidecar deps)
+**Last updated:** 2026-07-12 (task 015: file-backed `MemoryStore` selection via `MEMGUARD_STORE` / `MEMGUARD_STORE_PATH`, ADR-012)
 
 Every knob the system exposes. memory-guard is configured by **command-line flags** only — there are
 no config files, no application environment variables, and no secrets in v0.
@@ -46,6 +46,8 @@ tracked as a limitation rather than a config knob.
 | Variable | Values | Default | Effect |
 |----------|--------|---------|--------|
 | `MEMGUARD_DETECTOR` | `regex` \| `native` \| `presidio` | `native` | Selects the `Detector` backend at construction (`main.go` → `NewDetectorFromConfig`). `native` (default) = the Go-native in-process backend (ADR-002, `< 1 ms` hot path). `regex` = the v0 RegexDetector. `presidio` = the opt-in Presidio-backed sidecar (ADR-009, milliseconds/op, richer PII/NER recall). An unknown value is a fail-closed construction error, exit `2` — never a silent fallback. The value names a backend STRING only; no backend Go type leaks into the seam-protected files. |
+| `MEMGUARD_STORE` | `memory` \| `file` | `memory` | Selects the `MemoryStore` backend at construction (`main.go` → `NewStoreFromConfig`). `memory` (default) = the ephemeral in-memory map (`InMemoryStore`), unchanged v0 behavior. `file` = the persistent file-backed adapter (`FileStore`, ADR-012): a JSONL snapshot rewritten atomically on every mutation, read through to disk on every verb, so `verify_delete`'s absence proof and the residue scan run against real persistence. An unknown value is a fail-closed construction error, exit `2` (never a silent fallback). The value names a backend STRING only; no store Go type leaks into the seam-protected files. |
+| `MEMGUARD_STORE_PATH` | absolute path | — | Path to the JSONL store file, **required when `MEMGUARD_STORE=file`** (`file` with no path is a fail-closed construction error, exit `2`, never a silent default location). Ignored for `memory`. The file (and its `<path>.tmp` sibling during a rewrite) is bound mode `0600`. |
 
 **Hook profile env vars** (consumed by `.claude/scripts/`, not the application):
 - `CLAUDE_HOOK_PROFILE` — `minimal` / `standard` / `strict` (default `standard`)
