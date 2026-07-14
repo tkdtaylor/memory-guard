@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-07-12 (task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
+**Last updated:** 2026-07-14 (task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -54,7 +54,7 @@ the file is left untouched.
 
 - **Shape:** a `MemoryStore` (interface, `store.go`), **not** a raw map. Entries are keyed by the
   opaque `stored_id` (a `"mem-"+randHex(6)` string). `entry { content string; boundIdentity string;
-  flags []string }` (`guard.go`). `content` is the **redacted** content (PII already replaced by
+  sourceClass string; flags []string }` (`guard.go`). `content` is the **redacted** content (PII already replaced by
   `<LABEL>` placeholders by `RedactPII` at write time — the raw value is never stored). `boundIdentity`
   is the **normalized identity key** bound at write (the writer's `Principal.Subject()` when attested,
   else the unbound marker) — the key `validate_read` matches **exactly** against (ADR-004). `flags` is
@@ -82,6 +82,7 @@ the file is left untouched.
 type entry struct {
     content       string   // the REDACTED content (PII already <LABEL>-replaced); never the raw value
     boundIdentity string   // the writer's normalized identity key (Principal.Subject() if attested, else "" — the unbound marker); the EXACT key validate_read matches against (ADR-004)
+    sourceClass   string   // WRITE PROVENANCE (ADR-015): external_tool|user_input|agent_authored|system, or "unknown" for absent/unrecognized; WHERE the write came from, distinct from WHO (boundIdentity)
     flags         []string // PII/injection metadata recorded at write (e.g. "pii:EMAIL")
 }
 ```
@@ -97,6 +98,15 @@ type entry struct {
   a wildcard. The reserved marker is forge-proof: a `Subject()` equal to `"shared://"` maps to unbound.
   The typed identity wire shape (`{spiffe_id, trust_tier, scope?}`) is decoded into a `Principal` at
   the IPC boundary and never stored as a raw map; only the normalized key persists.
+- **`sourceClass` is WRITE PROVENANCE, not identity** (ADR-015). It is set ONLY in `ValidateWrite`,
+  via `sourceClassFromMap(identity)` at the SAME read of `identity` that binds `boundIdentity`, so the
+  stored provenance and the write's audit event (`OCSFFinding.SourceClass`) come from one decode and
+  cannot drift. Value is one of `external_tool` / `user_input` / `agent_authored` / `system`, or
+  `unknown` for an absent/empty/unrecognized `source_class` key (never a silent `agent_authored`).
+  Unlike `boundIdentity` it never gates a read: `ValidateRead` and `ScanScoped` ignore it entirely. It
+  is the field a future behavioral detector (roadmap 018/019) keys on; this task tags and threads it,
+  no policy acts on it yet. An entry read back with `sourceClass == ""` (written before this field
+  existed) must be treated the same as `unknown` by consumers.
 
 ### Seam: `MemoryStore` (the storage backend) and its two stdlib adapters
 
@@ -140,8 +150,10 @@ type entry struct {
   `MEMGUARD_STORE=file`. A single JSONL snapshot at `MEMGUARD_STORE_PATH`, rewritten atomically on
   every mutation (temp file + fsync + `os.Rename`, mode `0600`) and read through to disk on every verb
   (no in-memory cache). A `Delete` physically removes the deleted entry's bytes, so `verify_delete`'s
-  absence proof and the residue scan run against real persistence and survive a restart. All three
-  `entry` fields (`content`, `boundIdentity`, `flags`) round-trip through the persisted record above.
+  absence proof and the residue scan run against real persistence and survive a restart. All four
+  `entry` fields (`content`, `boundIdentity`, `sourceClass`, `flags`) round-trip through the persisted
+  record (`source_class` is `omitempty`, so a snapshot written before this field existed stays
+  byte-identical and its entries load with `sourceClass == ""`, treated as `unknown`).
   Corruption at construction is a fail-closed error (the file is left untouched); a runtime I/O failure
   panics (fail fast). Stdlib-only — `go.mod` stays require-free. Selected through the
   `NewStoreFromConfig` factory (`store_config.go`), mirroring the `Detector` config pattern.

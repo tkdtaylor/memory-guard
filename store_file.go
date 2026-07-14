@@ -16,7 +16,7 @@ import (
 // absence proof and the residue scan run against ACTUAL persistence: "the entry is gone"
 // becomes "the bytes are gone from disk-backed state", not "the key is gone from a map".
 //
-// Layout: one JSON object per line ({id, content, bound_identity, flags}). Every mutation
+// Layout: one JSON object per line ({id, content, bound_identity, source_class?, flags}). Every mutation
 // (Put/Delete) rewrites the WHOLE snapshot crash-safely (temp file + fsync + atomic
 // os.Rename over the canonical path, mode 0600), so a delete PHYSICALLY removes the
 // deleted entry's bytes from the canonical path — an append-only log would leave them as
@@ -32,21 +32,26 @@ import (
 // fileRecord is the on-disk wire form of an entry (one per JSONL line). It is internal to
 // this file and never crosses the MemoryStore seam. bound_identity carries the ADR-004
 // isolation key ("" for an unbound/unattested writer); flags carries the guard-computed
-// flag labels. All three entry fields round-trip faithfully (task 016 depends on
-// bound_identity persisting).
+// flag labels; source_class carries the write provenance (ADR-015, optional/omitempty). All
+// four entry fields round-trip faithfully (task 016 depends on bound_identity persisting).
 type fileRecord struct {
-	ID            string   `json:"id"`
-	Content       string   `json:"content"`
-	BoundIdentity string   `json:"bound_identity"`
-	Flags         []string `json:"flags"`
+	ID            string `json:"id"`
+	Content       string `json:"content"`
+	BoundIdentity string `json:"bound_identity"`
+	// SourceClass is the write's provenance tag (ADR-015). Optional on the wire: a record
+	// written before this field existed has no source_class key, which unmarshals to "" and
+	// is treated as sourceClassUnknown by consumers (no backfill migration). omitempty keeps
+	// pre-existing snapshots byte-identical when the field is empty.
+	SourceClass string   `json:"source_class,omitempty"`
+	Flags       []string `json:"flags"`
 }
 
 func (r fileRecord) toEntry() entry {
-	return entry{content: r.Content, boundIdentity: r.BoundIdentity, flags: r.Flags}
+	return entry{content: r.Content, boundIdentity: r.BoundIdentity, sourceClass: r.SourceClass, flags: r.Flags}
 }
 
 func recordFrom(id string, e entry) fileRecord {
-	return fileRecord{ID: id, Content: e.content, BoundIdentity: e.boundIdentity, Flags: e.flags}
+	return fileRecord{ID: id, Content: e.content, BoundIdentity: e.boundIdentity, SourceClass: e.sourceClass, Flags: e.flags}
 }
 
 // FileStore is the file-backed MemoryStore adapter. It holds ONLY the canonical path; all

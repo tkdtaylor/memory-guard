@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-07-12 (task 017: real `AuditTrailSink` transport + `serve --audit-socket` wiring, ADR-014; task 016: `ScanScoped` + identity `scope`, ADR-013)
+**Last updated:** 2026-07-14 (task 020: optional identity `source_class` write-provenance key + audit `source_class`, ADR-015; task 017: real `AuditTrailSink` transport + `serve --audit-socket` wiring, ADR-014; task 016: `ScanScoped` + identity `scope`, ADR-013)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -40,12 +40,17 @@ Subcommands:
 
 The agent surface. Newline-delimited JSON over the Unix socket bound by `serve --socket`. One request
 object per connection (read up to the first `\n`); the connection closes after the response. The
-`identity` field is the **typed principal** `{ "spiffe_id": string, "trust_tier": string, "scope"?: string }` (ADR-004, ADR-013) —
+`identity` field is the **typed principal** `{ "spiffe_id": string, "trust_tier": string, "scope"?: string, "source_class"?: string }` (ADR-004, ADR-013, ADR-015) —
 parsed (`req["identity"]` as a map) and decoded through the `Principal` seam, then **enforced** on
 `validate_read`: a writer's entry is returned only under a **matching attested** identity (see below).
 The optional `scope` is meaningful on `validate_write` only: `scope == "shared"` from an **attested**
 writer publishes the entry to the shared scope (readable under every identity); it is **ignored** from
 an unattested writer (binds unbound) and **ignored** on `validate_read`.
+The optional `source_class` (ADR-015) is **write provenance**, also meaningful on `validate_write` only:
+one of `external_tool` | `user_input` | `agent_authored` | `system`, with anything absent/unrecognized
+normalizing to `unknown`. It is decoded by the standalone `sourceClassFromMap` (not a `Principal`
+accessor), recorded on the stored entry, and stamped onto the write's audit event. It is **not** an
+access-control key (never gates a read) and **never** appears in any `validate_*` response.
 `identity` is **pre-verified upstream** (agent-mesh owns SVID issuance + verification and emits
 `trust_tier == "attested"` on success); the guard trusts the claim across the `0600` socket and adds no
 in-guard SVID/X.509 verification (deferred behind the `Principal` seam).
@@ -176,6 +181,11 @@ func (p PreVerifiedPrincipal) SharedScope() bool
 
 // sharedScopeKey = "shared://" is the reserved boundIdentity marker for shared-scope entries.
 // boundKeyFor maps any Subject() equal to it → unbound, so no spiffe_id can forge the shared binding.
+
+// source_class (write provenance, ADR-015) is decoded by a STANDALONE function, NOT a Principal
+// accessor: it is where-a-write-came-from, distinct from the who-wrote-it identity above, and never
+// gates a read. Principal stays exactly its three access-control methods.
+func sourceClassFromMap(identity map[string]any) string // "" / unrecognized → "unknown"; else the enum literal
 ```
 
 - **The identity seam** (`principal.go`) isolates *how identity is obtained/verified* from *how it is

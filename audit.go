@@ -71,6 +71,15 @@ type OCSFFinding struct {
 	// for rejected writes and verify_delete operations. Never carries the stored value.
 	StoredID string `json:"stored_id,omitempty"`
 
+	// SourceClass is the write's PROVENANCE tag (task 020 / ADR-015): one of
+	// external_tool | user_input | agent_authored | system, or "unknown"
+	// (sourceClassUnknown) for absent/unrecognized input. Populated on the two
+	// write-triggered builders (BuildPIIRedactionEvent / BuildInjectionRejectedEvent) from
+	// the SAME identity read that sets the stored entry's sourceClass, never re-derived, so
+	// the emitted event and the stored entry provably agree on where the write came from.
+	// Empty ("") on verify_delete events: deletion carries no writer-provenance concept.
+	SourceClass string `json:"source_class"`
+
 	// DeletionHash is the deterministic SHA-256 audit-linkage value from verify_delete
 	// (defined in residue.go). Present on deletion and residue events; "" otherwise.
 	DeletionHash string `json:"deletion_hash,omitempty"`
@@ -443,13 +452,17 @@ func boolPtr(b bool) *bool { return &b }
 //
 // REQ-004: the raw text is NEVER passed to this function — guard.go passes only flags
 // and the already-assigned storedID.
-func BuildPIIRedactionEvent(flags []string, storedID string) OCSFEvent {
+//
+// sourceClass (task 020 / ADR-015) is the write's provenance, threaded from the same
+// ValidateWrite identity read that sets the stored entry's sourceClass, never re-derived.
+func BuildPIIRedactionEvent(flags []string, storedID string, sourceClass string) OCSFEvent {
 	finding := OCSFFinding{
 		Type:          "pii_redaction",
 		Operation:     "validate_write",
 		Flags:         flagsOrEmptySlice(flags),
 		FlagCount:     len(flags),
 		StoredID:      storedID,
+		SourceClass:   sourceClass,
 		RelatedEvents: []string{},
 	}
 	return newEventEnvelope(ocsfSeverityLow, finding)
@@ -459,13 +472,18 @@ func BuildPIIRedactionEvent(flags []string, storedID string) OCSFEvent {
 // flags must contain "injection_suspected". storedID is always "" (fail-closed: no store).
 //
 // REQ-004: the raw text is NEVER passed to this function.
-func BuildInjectionRejectedEvent(flags []string) OCSFEvent {
+//
+// sourceClass (task 020 / ADR-015) is the write's provenance, threaded from the same
+// ValidateWrite identity read as the accepted-write path, so a rejected write's audit event
+// still records where the (rejected) write came from even though nothing persists.
+func BuildInjectionRejectedEvent(flags []string, sourceClass string) OCSFEvent {
 	finding := OCSFFinding{
 		Type:          "injection_rejected",
 		Operation:     "validate_write",
 		Flags:         flagsOrEmptySlice(flags),
 		FlagCount:     len(flags),
 		StoredID:      "", // fail-closed: poisoned writes are never stored
+		SourceClass:   sourceClass,
 		RelatedEvents: []string{},
 	}
 	return newEventEnvelope(ocsfSeverityHigh, finding)
