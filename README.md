@@ -24,6 +24,7 @@ are verified — proven gone, not merely deleted. It addresses the OWASP Agentic
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [The gates](#the-gates)
+- [Performance](#performance)
 - [Develop locally](#develop-locally)
 - [Tech stack](#tech-stack)
 - [Sponsorship](#sponsorship)
@@ -99,6 +100,25 @@ Deeper detail: [architecture overview](docs/architecture/overview.md),
 | **PII redaction** | Detects and redacts PII (email, SSN, API key, credit card, etc.) before storage and on read | Placeholders (`<EMAIL>`, `<SSN>`, etc.) replace raw PII |
 | **delete verify** | Deletes entry, re-checks absence, scans remaining entries for residue fragments | `confirmed: true/false`, `residue_detected`, `deletion_hash` |
 | **IPC daemon** | Unix-socket server accepting newline-delimited JSON ops: `validate_write`, `validate_read`, `verify_delete`, `ping` | JSON responses over socket |
+
+## Performance
+
+memory-guard gates *every* memory read and write, so per-call cost on the hot path is a first-class
+constraint, not an afterthought. The default detector is Go-native and in-process (no interpreter, no
+network round trip), and the numbers below are enforced as fitness gates (`make fitness`), not
+aspirational targets. Measured on the current tree:
+
+| Metric | Measured | Gate |
+|--------|----------|------|
+| `validate_write` latency (native detector) | **~27 µs/op** (500 ops, post-warmup) | budget `< 1 ms` (F-007), roughly 37x of headroom |
+| Adversarial poisoning gate | recall **0.81** (26/32), precision **0.87** (26/30) | floors 0.80 / 0.85 (F-006) |
+| PII corpus (9 categories) | recall **1.00**, precision **1.00** (0 false positives) | recall ≥ 0.80, precision 1.00 (F-006) |
+
+The default path is a single static Go binary with **zero third-party dependencies**. A Presidio-backed
+NER detector is available behind the same seam for higher PII recall; it runs as an opt-in sidecar
+(off by default) and costs roughly 3.93 ms/op warm, so the microsecond-scale default budget stays the
+property of the pure-Go path. Full methodology and the honest miss record live in
+[docs/spec/fitness-functions.md](docs/spec/fitness-functions.md) (F-006, F-007).
 
 ## Develop locally
 
