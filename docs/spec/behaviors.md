@@ -294,6 +294,45 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   `slow_sink_does_not_stall_hot_path`), `TestAsyncSinkNonBlocking`, and
   `TestDeletionHashIndependentOfSinkState`.)*
 
+### B-010: Flag self-reinforcement on repetitive self-authored writes (task 018 / ADR-016)
+
+- **Trigger:** a `validate_write` accepted by the write-gate (past the injection check) when the guard
+  is wired with a behavioral `WriteInspector` via `WithWriteInspector`. The CLI `serve` / `write` path
+  wires the shipped `SelfReinforcementDetector` by default; the off-switch is
+  `MEMGUARD_SELF_REINFORCEMENT=off`. A guard built without the inspector never exhibits this behavior.
+- **Response:** the inspector sees the write's content plus a `WriteContext` (`{Key, SourceClass}`:
+  the writer's bound identity key and the raw `source_class` hint). `SelfReinforcementDetector` keeps a
+  bounded per-subject history and adds `self_reinforcement_suspected` to `flags` when the incoming
+  write's token-set overlap coefficient meets or exceeds the similarity threshold against at least
+  `max_self_writes` prior same-subject writes inside the cooldown window. Defaults on the CLI path:
+  similarity `0.85`, cooldown `5m`, `max_self_writes 3` (so the 4th near-duplicate in a window is the
+  first to flag). All three, plus an injectable clock, are constructor-configurable.
+- **Additive, non-blocking (policy boundary):** the flag is **additive** on the existing `flags` array
+  and **never blocks**: a write carrying `self_reinforcement_suspected` is still `{ "allow": true,
+  "stored_id": "mem-…" }`, stored exactly as it would be without the inspector. The `validate_write`
+  response shape stays byte-for-byte `{allow, stored_id, flags}`. Whether the flag should ever block,
+  quarantine, or escalate is a policy-engine decision, deferred to a future quarantine-outcome task
+  (this behavior computes the signal, it does not act on it). The existing fail-closed injection path
+  is untouched: the inspector runs only on the accepted path, so a rejected poisoned write never
+  reaches it and never carries the flag.
+- **Source-class routing:** only an explicit `source_class: "human_authored"` opts a write out of
+  scrutiny (human repetition is out of scope). Every other value, including an absent hint, an empty
+  string, and any unrecognized value, defaults to agent-authored (fail-closed toward scrutiny). This is
+  forward-compatible with the durable provenance signal (ADR-015): when an explicit `agent_authored`
+  arrives it behaves identically to the missing-hint default.
+- **Bounded memory:** the per-subject history is evicted by cooldown expiry and capped at a hard
+  per-subject size, so one identity's history cannot grow without bound. The history is
+  detection-internal working state; it is **not** part of the persisted `MemoryStore`.
+- **Seam isolation:** the flag is produced entirely behind the `WriteInspector` seam; no
+  implementation specifics appear in `guard.go`, `ipc.go`, or the contract, and `docs/CONTRACT.md`
+  needs no edit (the `flags []string` shape already admits new string values).
+- **Known audit gap:** a write flagged `self_reinforcement_suspected` with **no PII** present emits no
+  audit-trail event, because emission is gated on `len(piiFlags) > 0` (B-009). Wiring a dedicated
+  emission path for the behavioral flag is out of scope for this task (recorded in ADR-016).
+  *(Tests: `TestTC001SeamIsDistinctFromDetector` through `TestTC011ADRAndSpecPropagation`,
+  `TestSelfReinforcementHarnessL5` (recall + precision in one run), `TestSelfReinforcementOverSocket`
+  (flag observed on the live socket).)*
+
 ---
 
 > **v0 scope note.** The store is an in-memory map and the detector is regex; reads are now

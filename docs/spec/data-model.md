@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
+**Last updated:** 2026-07-14 (task 018: `SelfReinforcementDetector` per-subject write-history in-memory state behind the `WriteInspector` seam, ADR-016; task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -75,6 +75,21 @@ the file is left untouched.
   locks it for the duration of its store access. A multi-index backing keeps its indexes consistent
   across the verbs within that lock.
 - **Bounds:** bounded by the number of clean writes; no eviction or TTL.
+
+### State: `SelfReinforcementDetector` per-subject write history (behind the `WriteInspector` seam, task 018 / ADR-016)
+
+- **Shape:** an in-memory `map[string][]writeRecord` keyed by the writer's bound identity key (`WriteContext.Key`),
+  where `writeRecord { tokens map[string]struct{}; at time.Time }` holds the token set of a past write
+  and the instant it was seen. It records the minimal state needed to detect `self_reinforcement_suspected`
+  (a repetition pattern over a cooldown window); the raw content is **not** retained, only its token set.
+- **Owner:** the `SelfReinforcementDetector` value (`self_reinforcement.go`), guarded by its own
+  `sync.Mutex` (independent of `MemoryGuard.mu`). It is **detection-internal working state**, deliberately
+  **not** part of the persisted `MemoryStore`: it never round-trips to disk, is never returned by any
+  `validate_*` verb, and is lost on restart.
+- **Lifetime / bounds:** populated on every accepted, agent-authored `Inspect` call. Bounded two ways so
+  a single identity's history cannot grow without limit: records older than the cooldown window are
+  evicted on each `Inspect`, and a hard per-subject size cap trims the oldest records. Bounding the
+  *number of distinct tracked identities* is a noted follow-up, not enforced in v0.
 
 ### Type: `entry` (a stored memory record)
 

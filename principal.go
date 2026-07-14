@@ -126,13 +126,36 @@ const sourceClassUnknown = "unknown"
 // exactly once per ValidateWrite and threads the single value to both the stored entry and
 // the emitted audit event, so the two can never drift.
 func sourceClassFromMap(identity map[string]any) string {
-	raw, _ := identity["source_class"].(string)
-	switch raw {
+	switch raw := rawSourceClass(identity); raw {
 	case sourceClassExternalTool, sourceClassUserInput, sourceClassAgentAuthored, sourceClassSystem:
 		return raw
 	default:
 		return sourceClassUnknown
 	}
+}
+
+// rawSourceClass is the SINGLE literal read of the identity map's source_class key on the write path. Both
+// provenance consumers decode through it, so the stored entry, the audit event, and the behavioral
+// hint all observe the same one read and can never drift: sourceClassFromMap normalizes it to the
+// four-value enum (task 020), and writeProvenanceHint trims it for the behavioral seam (task 018).
+// Keeping the key lookup in one place is the single-decode-site invariant TestProvenanceTC008
+// enforces.
+func rawSourceClass(identity map[string]any) string {
+	raw, _ := identity["source_class"].(string)
+	return raw
+}
+
+// writeProvenanceHint returns the RAW, trimmed source_class string carried on the identity map
+// (or "" when the key is absent or not a string). It is the behavioral-detector seam's provenance
+// input (task 018 / ADR-016), a sibling to sourceClassFromMap with a deliberately different
+// contract: it does NOT normalize unrecognized values to sourceClassUnknown. The behavioral seam
+// must distinguish an explicit "human_authored" (a write it must NOT scrutinize) from an absent
+// hint (a write it defaults to scrutinizing), a distinction the four-value sourceClassFromMap enum
+// collapses to "unknown". Provenance-as-stored-tag and provenance-as-audit-tag stay with
+// sourceClassFromMap; only the behavioral hint reads through here. Both read the same immutable
+// identity key, so the stored provenance and the behavioral hint cannot drift.
+func writeProvenanceHint(identity map[string]any) string {
+	return strings.TrimSpace(rawSourceClass(identity))
 }
 
 // normalizeSubject canonicalizes a SPIFFE ID into the stored/matched key. v1 trims

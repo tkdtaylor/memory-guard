@@ -252,7 +252,7 @@ func (s *AsyncSink) Close()                            // stops the drain gorout
 
 ## Extension points
 
-Three extension points exist, all seams behind stable interfaces:
+Four extension points exist, all seams behind stable interfaces:
 
 1. **`Detector` interface** (`detector.go`) — the detection backend (PII + injection). Two
    implementations ship: `RegexDetector` (v0 stand-in) and `NativeDetector` (Go-native in-process,
@@ -266,6 +266,16 @@ Three extension points exist, all seams behind stable interfaces:
    test fakes, and the real `AuditTrailSink` (`audit_trail_sink.go`, ADR-014) speaking the confirmed
    audit-trail Unix-socket emit contract, opt-in via `serve --audit-socket`. Any other transport
    (HTTP / file) slots in additively behind this seam.
+4. **`WriteInspector` interface** (`write_inspector.go`, ADR-016): the **stateful behavioral-detection**
+   seam, distinct from the stateless `Detector`. `Inspect(content string, ctx WriteContext) []string`
+   sees a write's content plus a `WriteContext` (`{Key, SourceClass}`: the writer's bound identity key
+   and the raw source-class hint) and returns **additive, non-blocking** flags. Unlike `Detector`, an
+   implementation may hold state; the shipped `SelfReinforcementDetector` (`self_reinforcement.go`)
+   keeps a bounded per-identity write history and flags `self_reinforcement_suspected` when a write is a
+   token-set near-duplicate of enough recent same-subject writes within a cooldown window. Opt-in via
+   `(*MemoryGuard).WithWriteInspector` (nil = disabled, default); wired live on the `serve` / `write`
+   CLI path, off-switch `MEMGUARD_SELF_REINFORCEMENT=off`. A richer behavioral detector slots in behind
+   this seam with no guard / IPC / contract impact.
 
 There is no plugin registry; extension is by source modification behind each seam. A new implementation
 of any seam requires zero changes to `guard.go`, `ipc.go`, `main.go`, or the wire contract.
