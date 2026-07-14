@@ -1,6 +1,6 @@
 # Architecture Diagrams — memory-guard
 
-**Last updated:** 2026-07-12 (task 017: opt-in audit-trail emit socket edge, ADR-014; task 016: store-side `ScanScoped` + shared scope, ADR-013; task 015: persistent `FileStore`, ADR-012)
+**Last updated:** 2026-07-14 (task 020: write-provenance `sourceClass` tag on the Put payload, ADR-015; task 017: opt-in audit-trail emit socket edge, ADR-014; task 016: store-side `ScanScoped` + shared scope, ADR-013; task 015: persistent `FileStore`, ADR-012)
 
 C4-structured Mermaid diagrams plus the primary runtime sequence. See [overview.md](overview.md) for
 prose context, [decisions/](decisions/) for the ADRs referenced here, and
@@ -136,7 +136,8 @@ sequenceDiagram
             Guard->>Det: RedactPII(entry)
             Det-->>Guard: redacted, ("pii:EMAIL",…)
             Note over Guard: bind writer identity via Principal seam (principal.go): boundKey = attested Subject() else unbound
-            Guard->>Store: Put("mem-"+randHex(6), { redacted, boundIdentity:boundKey, flags })
+            Note over Guard: tag provenance via sourceClassFromMap(identity): sourceClass = enum literal else "unknown" (ADR-015)
+            Guard->>Store: Put("mem-"+randHex(6), { redacted, boundIdentity:boundKey, sourceClass, flags })
             Guard-->>IPC: { allow:true, stored_id:"mem-…", flags:(…) }
             IPC-->>Agent: { allow:true, stored_id:"mem-…", flags:(…) }
             Note over Agent: agent gets an opaque stored_id, never the raw value

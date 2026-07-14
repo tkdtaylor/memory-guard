@@ -85,6 +85,56 @@ func principalFromMap(identity map[string]any) Principal {
 	}
 }
 
+// ─── Write-provenance / source-class (task 020 / ADR-015) ─────────────────────
+//
+// source_class is caller-supplied WRITE PROVENANCE: where a write came from, not who
+// wrote it. It rides on the same identity map as {spiffe_id, trust_tier, scope} (ADR-013
+// precedent), an OPTIONAL key, additive, with no change to the validate_write response
+// shape. Unlike spiffe_id / trust_tier / scope it is NOT an access-control key: it never
+// gates ValidateRead visibility and is never matched against a reader's visible-key set.
+// It is deliberately kept OUT of the Principal accessors (Subject/Attested/SharedScope,
+// the access-control seam) and decoded through this standalone function, so the identity
+// seam stays single-purpose (who) and the provenance seam stays single-purpose (where-from).
+
+// The four recognized source-class wire values. A write is tagged with exactly one of
+// these, or normalizes to sourceClassUnknown. external_tool is the primary ASI06 vector
+// (tool output landing in memory as if it were trusted first-party content).
+const (
+	sourceClassExternalTool  = "external_tool"
+	sourceClassUserInput     = "user_input"
+	sourceClassAgentAuthored = "agent_authored"
+	sourceClassSystem        = "system"
+)
+
+// sourceClassUnknown is the conservative sentinel for a missing, empty, wrong-typed, or
+// unrecognized source_class. It is NEVER silently treated as agent_authored or dropped:
+// any future trust-weighting policy (the behavioral-detector work, roadmap 018/019) MUST
+// treat sourceClassUnknown at least as cautiously as sourceClassExternalTool
+// (untrusted-until-shown-otherwise), the same fail-closed posture the write-gate uses for
+// suspected injection. Entries written before this task carry the Go zero value "" for the
+// field; consumers must treat "" the same as sourceClassUnknown (no backfill migration).
+const sourceClassUnknown = "unknown"
+
+// sourceClassFromMap decodes the optional source_class provenance tag out of the identity
+// map. One of the four recognized enum literals passes through unchanged; a missing key, an
+// empty string, a non-string JSON value, or any unrecognized string normalizes to
+// sourceClassUnknown. A nil map yields sourceClassUnknown.
+//
+// This is a STANDALONE function beside principalFromMap, NOT a fourth Principal accessor:
+// provenance is where-a-write-came-from, distinct from the who-wrote-it identity the
+// Principal seam carries. It is the ONLY place source_class is decoded; the guard reads it
+// exactly once per ValidateWrite and threads the single value to both the stored entry and
+// the emitted audit event, so the two can never drift.
+func sourceClassFromMap(identity map[string]any) string {
+	raw, _ := identity["source_class"].(string)
+	switch raw {
+	case sourceClassExternalTool, sourceClassUserInput, sourceClassAgentAuthored, sourceClassSystem:
+		return raw
+	default:
+		return sourceClassUnknown
+	}
+}
+
 // normalizeSubject canonicalizes a SPIFFE ID into the stored/matched key. v1 trims
 // surrounding whitespace only; matching is EXACT on the result (no substring/fuzzy,
 // so "tenant-1" never matches "tenant-12"). A richer normalization (case folding of

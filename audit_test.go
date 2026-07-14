@@ -202,7 +202,7 @@ func TestAuditTC002_OCSFShape(t *testing.T) {
 	g := buildFakeGuard(sink)
 
 	// Trigger each detection class.
-	g.ValidateWrite("contact alice@example.com for details", nil)     // pii_redaction
+	g.ValidateWrite("contact alice@example.com for details", nil)      // pii_redaction
 	g.ValidateWrite(injectionText, nil)                                // injection_rejected
 	writeOut := g.ValidateWrite("note about secret-key-projectX", nil) // pii-bearing
 	id, _ := writeOut["stored_id"].(string)
@@ -689,7 +689,7 @@ func TestAuditTC007_ConfigGated(t *testing.T) {
 func TestAuditTC002_UnknownFlagMapsToValidEvent(t *testing.T) {
 	// BuildPIIRedactionEvent must never return an event missing required OCSF fields,
 	// even with an unusual/empty flag set.
-	e := BuildPIIRedactionEvent([]string{"pii:FUTURE_LABEL_UNKNOWN"}, "mem-abc123")
+	e := BuildPIIRedactionEvent([]string{"pii:FUTURE_LABEL_UNKNOWN"}, "mem-abc123", sourceClassUnknown)
 	if e.ClassUID == 0 {
 		t.Errorf("class_uid must not be zero for an unknown flag")
 	}
@@ -711,12 +711,12 @@ func TestAuditTC002_UnknownFlagMapsToValidEvent(t *testing.T) {
 // ─── Helper: severity mapping is deterministic ────────────────────────────────
 
 func TestAuditSeverityMapping(t *testing.T) {
-	inj := BuildInjectionRejectedEvent([]string{"injection_suspected"})
+	inj := BuildInjectionRejectedEvent([]string{"injection_suspected"}, sourceClassUnknown)
 	if inj.SeverityID != ocsfSeverityHigh {
 		t.Errorf("injection event severity want %d got %d", ocsfSeverityHigh, inj.SeverityID)
 	}
 
-	pii := BuildPIIRedactionEvent([]string{"pii:EMAIL"}, "mem-123")
+	pii := BuildPIIRedactionEvent([]string{"pii:EMAIL"}, "mem-123", sourceClassUnknown)
 	if pii.SeverityID != ocsfSeverityLow {
 		t.Errorf("pii event severity want %d got %d", ocsfSeverityLow, pii.SeverityID)
 	}
@@ -791,7 +791,7 @@ func TestAsyncSinkNonBlocking(t *testing.T) {
 
 	// Emit must return well under the slow delay (it only enqueues).
 	start := time.Now()
-	if err := async.Emit(BuildPIIRedactionEvent([]string{"pii:EMAIL"}, "mem-x")); err != nil {
+	if err := async.Emit(BuildPIIRedactionEvent([]string{"pii:EMAIL"}, "mem-x", sourceClassUnknown)); err != nil {
 		t.Fatalf("AsyncSink.Emit returned unexpected error: %v", err)
 	}
 	elapsed := time.Since(start)

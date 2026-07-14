@@ -19,6 +19,13 @@ re-validation is a noted follow-up, and the shapes are detector-agnostic behind 
   `residue_summary` when true); `deletion_hash` is a deterministic SHA-256 over the deletion op for
   audit-trail linkage. The residue scan is guard-side stdlib logic (ADR-003), not a `Detector` concern.
 
+The `identity` map is a caller-supplied, guard-trusted claim (ADR-004). Beyond `spiffe_id` and
+`trust_tier`, it may carry two **optional** keys, both meaningful on `validate_write` only and
+neither changing the response shape above: `scope` (`"shared"` publish, ADR-013) and `source_class`
+(write provenance, one of `external_tool` | `user_input` | `agent_authored` | `system`, anything
+absent/unrecognized normalizing to `unknown`, ADR-015). `source_class` is provenance metadata, not
+an access-control key: it never gates a read.
+
 ## Detector seam
 PII + injection detection sits behind the `Detector` interface (detector.go), so Presidio
 (v1, Python sidecar / ONNX) can replace the v0 RegexDetector without contract impact.

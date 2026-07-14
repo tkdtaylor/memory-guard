@@ -40,7 +40,19 @@ type entry struct {
 	// (ADR-004). It is set ONLY in ValidateWrite via boundKeyFor; nothing else writes
 	// it, so the bound-at-write key is exactly the matched-at-read key.
 	boundIdentity string
-	flags         []string
+	// sourceClass is the write's PROVENANCE tag (task 020 / ADR-015): one of
+	// external_tool | user_input | agent_authored | system, or sourceClassUnknown for
+	// absent/unrecognized input. It records WHERE a write came from, distinct from the
+	// boundIdentity (WHO wrote it). It is set ONLY in ValidateWrite via sourceClassFromMap
+	// at the SAME read of identity that binds boundIdentity, so the stored provenance and
+	// the emitted audit event's provenance are provably the same decode. This is the field
+	// a future behavioral detector (roadmap 018/019) keys on (e.g. sourceClass ==
+	// "agent_authored" for self-reinforcement); this task tags and threads it, no policy
+	// acts on it yet. Entries written before this task carry "" (Go zero value); consumers
+	// must treat "" the same as sourceClassUnknown. It is NOT part of any validate_*
+	// response, provenance is not an access-control key and never gates a read.
+	sourceClass string
+	flags       []string
 }
 
 // NewMemoryGuard wires the guard with a Detector and (optionally) a MemoryStore. Both
@@ -93,17 +105,26 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 	redacted, piiFlags := g.det.RedactPII(text)
 	flags = append(flags, piiFlags...)
 
+	// Decode the write's provenance ONCE, here, from the same identity map that binds the
+	// writer's key below. This single value is threaded to BOTH the stored entry and every
+	// emitted audit event (rejected or accepted), so the store and the audit trail agree on
+	// where the write came from, value-for-value. This sourceClassFromMap call is the ONLY
+	// provenance decode on the write path; the guard never reads the raw key a second time
+	// (task 020 / ADR-015).
+	srcClass := sourceClassFromMap(identity)
+
 	if contains(flags, "injection_suspected") {
 		// fail-closed on suspected context poisoning: do not store.
 		// Emit the injection-rejection event AFTER the verdict is computed — the sink
 		// failure never changes the verdict (fail-open for the sink, fail-closed for the gate).
-		emitSafe(g.audit, BuildInjectionRejectedEvent(flags))
+		// The provenance still rides the event even though nothing persists.
+		emitSafe(g.audit, BuildInjectionRejectedEvent(flags, srcClass))
 		return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
 	}
 	boundKey := boundKeyFor(principalFromMap(identity)) // producer: the identity bound at write
 	g.mu.Lock()
 	id := "mem-" + randHex(6)
-	g.store.Put(id, entry{content: redacted, boundIdentity: boundKey, flags: flags})
+	g.store.Put(id, entry{content: redacted, boundIdentity: boundKey, sourceClass: srcClass, flags: flags})
 	g.mu.Unlock()
 
 	// Emit a PII-redaction event only when PII was actually found (non-empty piiFlags).
@@ -111,7 +132,7 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 	// The event is built from the already-computed flags and the opaque stored_id only:
 	// the raw text and the redacted content NEVER enter the event (REQ-004).
 	if len(piiFlags) > 0 {
-		emitSafe(g.audit, BuildPIIRedactionEvent(flags, id))
+		emitSafe(g.audit, BuildPIIRedactionEvent(flags, id, srcClass))
 	}
 
 	return map[string]any{"allow": true, "stored_id": id, "flags": flagsOrEmpty(flags)}
@@ -135,7 +156,7 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 // specifics enter the identity path. The read path ignores any scope on the identity.
 func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any {
 	wantKey, _ := readerVisibilityKey(principalFromMap(identity)) // consumer: the key matched at read
-	visibleKeys := []string{wantKey, sharedScopeKey}             // + shared: readable by every class
+	visibleKeys := []string{wantKey, sharedScopeKey}              // + shared: readable by every class
 	g.mu.Lock()
 	scoped := g.store.ScanScoped(query, visibleKeys) // store-side identity scoping (ADR-013)
 	g.mu.Unlock()

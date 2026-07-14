@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** memory-guard
-**Last updated:** 2026-07-12 (task 016: store-side `ScanScoped` + shared scope + restart-surviving isolation, ADR-013)
+**Last updated:** 2026-07-14 (task 020: write-provenance `source_class` tag on the write path + audit event, ADR-015; task 016: store-side `ScanScoped` + shared scope + restart-surviving isolation, ADR-013)
 
 What the system does, observably — triggering condition, response, externally-visible side effects,
 failure modes. The "you can verify this from outside the process" view.
@@ -35,8 +35,18 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   reserved marker is **forge-proof**: a `spiffe_id` equal to `sharedScopeKey` maps to unbound, so only
   an explicit attested `scope:"shared"` reaches the shared binding. No SPIFFE/X.509 specifics enter the
   guard; only `Principal` crosses the seam.
+- **Write provenance (ADR-015):** the guard decodes an optional `source_class` key off the same
+  `identity` map, once, via `sourceClassFromMap`, and records it on the entry as `sourceClass`. It is
+  one of `external_tool` / `user_input` / `agent_authored` / `system`, or `unknown` when the key is
+  absent, empty, or unrecognized (never a silent `agent_authored`). Provenance is **where** the write
+  came from, distinct from the bound identity (**who** wrote it); it never gates a read. The same single
+  decoded value is stamped onto the write's audit event (`OCSFFinding.SourceClass`, B-009) for both
+  accepted (PII-redaction) and rejected (injection) writes, so the stored entry and the event agree
+  value-for-value. This tags and threads provenance; no policy acts on it yet (the behavioral-detector
+  work, roadmap 018/019, is the intended consumer). The `validate_write` response shape is unchanged:
+  `source_class` never appears in the response.
 - **Side effects:** on a clean write, mutates the in-memory store (with the **redacted** content +
-  the bound-identity key + flags). On a rejected write, no store mutation.
+  the bound-identity key + the source-class provenance tag + flags). On a rejected write, no store mutation.
 - **Failure modes:** a write flagged for poisoning never persists (the write-gate). The raw PII is
   **never** stored — only the redacted form. The agent receives the opaque `stored_id`, **never** the
   raw value. *(Tests: `TestWriteGateRejectsSuspectedInjection`, `TestWriteRedactsPIIAndStores`, `TestPoisoningRecallPrecision`, `TestPoisoningFailClosedPerCase` — adversarial recall=0.69, precision=0.85 on the v0 4-pattern regex; measured 2026-06-19 against 32-case corpus; see fitness-functions.md F-006.)*
@@ -226,8 +236,11 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   contract response shapes are unchanged). Events carry the **OCSF Security Finding envelope**
   (`class_uid=2001`, `category_uid=2`, `activity_id=1`, `severity_id` by detection class, a UTC
   `time` timestamp, and a `metadata.product.name="memory-guard"` block) plus a structured `finding`
-  block (`type`, `operation`, `flags`, `flag_count`, `stored_id`, `deletion_hash`, `residue_detected`).
-  Detection detail is in **structured fields, never a free-text blob** (REQ-002). Severity:
+  block (`type`, `operation`, `flags`, `flag_count`, `stored_id`, `source_class`, `deletion_hash`, `residue_detected`).
+  The two **write-triggered** builders (`BuildPIIRedactionEvent`, `BuildInjectionRejectedEvent`) stamp
+  `source_class` from the write's provenance (ADR-015, B-001), the SAME decoded value stored on the
+  entry, so the event and the entry agree value-for-value. `verify_delete` events carry `source_class`
+  empty (deletion has no writer-provenance concept). Detection detail is in **structured fields, never a free-text blob** (REQ-002). Severity:
   `injection_rejected` → High (4); `pii_redaction` → Low (2); `residue_found` → Medium (3);
   `deletion_verified` → Informational (1). A benign write with no detection flags emits no event
   (deterministic).

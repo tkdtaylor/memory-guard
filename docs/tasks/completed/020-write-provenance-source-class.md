@@ -2,7 +2,7 @@
 
 **Project:** memory-guard
 **Created:** 2026-07-14
-**Status:** ❌ Not started
+**Status:** 🟡 Code merged (ADR-015; awaiting spec-verifier + L5/L6 for ✅)
 
 ## Goal
 
