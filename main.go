@@ -75,6 +75,25 @@ func buildStore() MemoryStore {
 	return store
 }
 
+// selfReinforcementEnabled reports whether the behavioral WriteInspector is wired on the
+// serve/write path. It is ON by default; the documented off-switch MEMGUARD_SELF_REINFORCEMENT=off
+// disables it (any other value, including unset, leaves it on). Task 018 / ADR-016.
+func selfReinforcementEnabled() bool {
+	return os.Getenv("MEMGUARD_SELF_REINFORCEMENT") != "off"
+}
+
+// buildWriteInspector constructs the behavioral WriteInspector wired into the serve/write path:
+// a SelfReinforcementDetector with the ADR-016 default parameters (similarity 0.85, cooldown 5m,
+// max self-writes 3). It returns nil when disabled, so WithWriteInspector wires the seam OFF and
+// the guard behaves exactly as pre-task. This is the single wiring call site for the concrete
+// behavioral detector; guard.go / ipc.go only ever see the WriteInspector interface.
+func buildWriteInspector() WriteInspector {
+	if !selfReinforcementEnabled() {
+		return nil
+	}
+	return NewSelfReinforcementDetector()
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: memory-guard <serve|write|read> …")
@@ -93,19 +112,25 @@ func main() {
 		// audit emission is opt-in and off by default: the --audit-socket flag wins over the
 		// MEMGUARD_AUDIT_SOCKET env fallback; an empty result leaves emission disabled.
 		auditPath := resolveAuditSocket(*auditSocket, os.Getenv("MEMGUARD_AUDIT_SOCKET"))
-		guard := NewMemoryGuard(buildDetector(), buildStore()).WithAudit(buildAuditConfig(auditPath))
+		guard := NewMemoryGuard(buildDetector(), buildStore()).
+			WithAudit(buildAuditConfig(auditPath)).
+			WithWriteInspector(buildWriteInspector())
 		auditTarget := auditPath
 		if auditTarget == "" {
 			auditTarget = "off"
 		}
-		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s, store: %s, audit: %s)\n",
-			*socket, detectorBackend(), storeBackend(), auditTarget)
+		selfReinforceTarget := "on"
+		if !selfReinforcementEnabled() {
+			selfReinforceTarget = "off"
+		}
+		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s, store: %s, audit: %s, self-reinforcement: %s)\n",
+			*socket, detectorBackend(), storeBackend(), auditTarget, selfReinforceTarget)
 		if err := serve(*socket, guard); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
 	case "write":
-		g := NewMemoryGuard(buildDetector(), buildStore())
+		g := NewMemoryGuard(buildDetector(), buildStore()).WithWriteInspector(buildWriteInspector())
 		printJSON(g.ValidateWrite(arg(2), nil))
 	case "read":
 		g := NewMemoryGuard(buildDetector(), buildStore())

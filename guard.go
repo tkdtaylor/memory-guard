@@ -29,6 +29,13 @@ type MemoryGuard struct {
 	det   Detector
 	store MemoryStore
 	audit AuditSink // nil = emission disabled (default); non-nil = emit on each detection
+	// inspector is the opt-in behavioral WriteInspector seam (task 018 / ADR-016): a stateful
+	// detector that sees the write's content plus backend-agnostic write metadata and returns
+	// ADDITIVE, NON-BLOCKING flags. nil = seam disabled (default); a guard built without
+	// WithWriteInspector is byte-for-byte behaviorally unchanged from pre-task. The guard holds
+	// only the interface, never a concrete implementation, mirroring how it holds Detector and
+	// MemoryStore.
+	inspector WriteInspector
 }
 
 type entry struct {
@@ -89,7 +96,18 @@ func (g *MemoryGuard) WithAudit(cfg AuditConfig) *MemoryGuard {
 	if cfg.isActive() {
 		sink = cfg.Sink
 	}
-	return &MemoryGuard{det: g.det, store: g.store, audit: sink}
+	return &MemoryGuard{det: g.det, store: g.store, audit: sink, inspector: g.inspector}
+}
+
+// WithWriteInspector returns a copy of the guard with the given behavioral WriteInspector wired
+// in (immutable builder-style, mirroring WithAudit; task 018 / ADR-016). A nil inspector wires
+// the seam OFF: a guard built without this call, or with nil, is behaviorally identical to
+// pre-task, and no behavioral flag can ever appear in its flags. The original guard is
+// unchanged. This is the injection point main.go's serve/write path and the tests use to wire the
+// behavioral inspector; the guard holds only the WriteInspector interface, never the concrete
+// implementation, so no behavioral-backend specifics leak past the seam.
+func (g *MemoryGuard) WithWriteInspector(wi WriteInspector) *MemoryGuard {
+	return &MemoryGuard{det: g.det, store: g.store, audit: g.audit, inspector: wi}
 }
 
 // ValidateWrite is the write-gate: flag poisoning (fail-closed), redact PII, then store.
@@ -122,6 +140,20 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 		return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
 	}
 	boundKey := boundKeyFor(principalFromMap(identity)) // producer: the identity bound at write
+
+	// Behavioral inspection (task 018 / ADR-016): the opt-in WriteInspector sees the write's
+	// content plus backend-agnostic write metadata (the writer's bound key + the raw source-class
+	// hint). Its flags are ADDITIVE and NON-BLOCKING (fail-open): a behavioral finding is appended
+	// to flags but never changes allow / stored_id. This runs ONLY on the accepted path, after the
+	// injection gate, so the fail-closed injection invariant is untouched. The seam is nil by default
+	// (behavior unchanged). This is the single behavioral-seam call site; the concrete inspector
+	// stays behind the WriteInspector interface. writeProvenanceHint is the raw source-class hint
+	// (distinct concern from srcClass above, which is the normalized provenance the entry and audit
+	// event record); both read the same immutable key, so they cannot drift (ADR-016 §4).
+	if g.inspector != nil {
+		flags = append(flags, g.inspector.Inspect(text, WriteContext{Key: boundKey, SourceClass: writeProvenanceHint(identity)})...)
+	}
+
 	g.mu.Lock()
 	id := "mem-" + randHex(6)
 	g.store.Put(id, entry{content: redacted, boundIdentity: boundKey, sourceClass: srcClass, flags: flags})
