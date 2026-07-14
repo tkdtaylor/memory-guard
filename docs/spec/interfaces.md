@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 020: optional identity `source_class` write-provenance key + audit `source_class`, ADR-015; task 017: real `AuditTrailSink` transport + `serve --audit-socket` wiring, ADR-014; task 016: `ScanScoped` + identity `scope`, ADR-013)
+**Last updated:** 2026-07-14 (task 021: optional `validate_write` `key` request field + `protected_key_violation` / `immutable_mismatch` flag values + `KeyPolicy` / `WithKeyPolicy` / `NewKeyPolicyFromConfig`, ADR-017; task 020: optional identity `source_class` write-provenance key + audit `source_class`, ADR-015; task 017: real `AuditTrailSink` transport + `serve --audit-socket` wiring, ADR-014; task 016: `ScanScoped` + identity `scope`, ADR-013)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -54,11 +54,20 @@ access-control key (never gates a read) and **never** appears in any `validate_*
 `identity` is **pre-verified upstream** (agent-mesh owns SVID issuance + verification and emits
 `trust_tier == "attested"` on success); the guard trusts the claim across the `0600` socket and adds no
 in-guard SVID/X.509 verification (deferred behind the `Principal` seam).
+`validate_write` also accepts an optional top-level `key` (a plain string, ADR-017): a caller-supplied
+logical slot name that runs the named-key write-time policy. Absent/empty `key` is today's unkeyed
+write (byte-identical). A `key` under the reserved prefix `memguard:` is enforced fail-closed (an
+unattested writer or a value that drifts from the first-written baseline is rejected); a `key` matching
+an operator-configured `MEMGUARD_PROTECTED_KEYS` / `MEMGUARD_IMMUTABLE_KEYS` glob is flag-only (the
+violation adds a flag but the write is allowed). The `key` is a policy input only: it is never
+persisted on the entry, not part of `MemoryStore`, and not readable back by key. Reserved status takes
+precedence over any operator pattern. Only the IPC `serve` path carries `key`; the `write`/`read` CLI
+demo subcommands stay unkeyed.
 
 | Op | Request | Response |
 |----|---------|----------|
 | `ping` | `{"op":"ping"}` | `{"ok":true}` |
-| `validate_write` | `{"op":"validate_write","entry":…,"identity":{"spiffe_id":…,"trust_tier":…,"scope"?:"shared"}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` — **the raw value is never returned; a poisoned write never persists; the entry is bound to the writer's identity key** (the reserved shared marker iff attested **and** `scope=="shared"`, else the writer's `spiffe_id` / the unbound marker) |
+| `validate_write` | `{"op":"validate_write","entry":…,"key"?:"memguard:… \| config:… \| …","identity":{"spiffe_id":…,"trust_tier":…,"scope"?:"shared"}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` · reserved-key violation: `{"allow":false,"stored_id":null,"flags":[…,"protected_key_violation" \| "immutable_mismatch"]}` · configured-key violation: `{"allow":true,"stored_id":"mem-…","flags":[…,"protected_key_violation" \| "immutable_mismatch"]}` — **the raw value is never returned; a poisoned or reserved-key-violating write never persists; the optional `key` is a policy input only, never stored; the entry is bound to the writer's identity key** (the reserved shared marker iff attested **and** `scope=="shared"`, else the writer's `spiffe_id` / the unbound marker) |
 | `validate_read` | `{"op":"validate_read","query":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — contents matching the query **AND** the reader's visible-key set, joined and **PII-redacted on the way out**. An attested reader sees its **exact** `spiffe_id`'s entries **plus shared-scope entries**; an unattested/absent reader sees **unbound** entries **plus shared-scope entries** (never an identity-bound entry, never the whole store). Scoping is a single store-side `ScanScoped` call (ADR-013) |
 | `verify_delete` | `{"op":"verify_delete","id":…}` | `{"confirmed":true,"residue_detected":bool,"residue_summary"?:…,"deletion_hash":…}` — fresh post-delete presence check **plus** a residue scan of the remaining store; `residue_summary` present only when `residue_detected:true`; `deletion_hash` is a deterministic SHA-256 of the deletion op |
 | *(other / malformed)* | any unparseable / unknown op | `{"error":{"code","message","retryable":false}}` (`bad_request` / `unknown_op`) |
@@ -104,7 +113,7 @@ same seam.
 type MemoryGuard struct { /* mu sync.Mutex; det Detector; store map[string]entry */ }
 
 func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard             // det == nil → default RegexDetector; omitted store → default InMemoryStore
-func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → RedactPII → store BOUND TO the writer's key (Principal.Subject(), or sharedScopeKey when attested + scope "shared") (ADR-004/ADR-013); returns {allow, stored_id, flags}
+func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ...string) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → named-key policy (ADR-017) → RedactPII → store BOUND TO the writer's key (Principal.Subject(), or sharedScopeKey when attested + scope "shared") (ADR-004/ADR-013); returns {allow, stored_id, flags}. The variadic key is an optional logical slot name (ADR-017); a 2-arg call is byte-identical to pre-021
 func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // store-side ScanScoped over the reader's visible keys {Subject()|unbound, sharedScopeKey} → RedactPII; returns {allow, content_redacted, flags} (ADR-013)
 func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors across EVERY backing index/copy for residue; returns {confirmed, residue_detected, residue_summary?, deletion_hash}
 ```
@@ -247,6 +256,33 @@ func (s *AsyncSink) Close()                            // stops the drain gorout
 - Emission is always **fail-open** (via `emitSafe`): errors swallowed, panics recovered, nil = no-op.
 - The OCSF event shape is defined in `audit.go` (`OCSFEvent` / `OCSFFinding`); see ADR-007 for the
   shape rationale and the documented assumption about the public OCSF schema.
+
+---
+
+### Type: `KeyPolicy` — the named-key write-time policy (ADR-017)
+
+```go
+type KeyPolicy struct {
+    Protected []string // path.Match globs; an unattested writer to a match is flagged protected_key_violation (flag-only)
+    Immutable []string // path.Match globs; a value drift under a match is flagged immutable_mismatch (flag-only)
+}
+
+func NewKeyPolicyFromConfig(protectedCSV, immutableCSV string) (KeyPolicy, error)  // CSV glob lists; malformed pattern → fail-closed error wrapping path.ErrBadPattern; empty → reserved-only policy
+func (g *MemoryGuard) WithKeyPolicy(policy KeyPolicy) *MemoryGuard                  // builder (mirrors WithAudit); composes with WithAudit / WithWriteInspector in any order
+
+// isReservedSystemKey(key) = strings.HasPrefix(key, "memguard:") — always active, not configurable
+// immutableBaselineHash(content) = hex(SHA-256("immutable\x00" + content)) — the baseline digest (reuses residue.go::deletionHash's idiom)
+```
+
+- **Two tiers, one policy** (ADR-017): the reserved `memguard:` prefix is enforced **fail-closed**
+  (unattested writer or baseline drift → reject, nothing stored); operator-configured `Protected` /
+  `Immutable` globs are **flag-only** (allow through, add the flag). Reserved status takes precedence.
+- **The baseline registry is in-process only** — a key's first-written (redacted) content hash is held
+  in a guard-side map, lost on restart (durability is deferred, ADR-017; mirrors the 009→016 identity
+  precedent). The baseline stays pinned to the first value, never advanced by a mismatching write.
+- **`key` never leaks into storage or the seams**: it is a `ValidateWrite` policy input only, not
+  persisted on `entry`, not in `MemoryStore`, and stdlib-only (`path.Match`, `crypto/sha256`), so the
+  seam-isolation fitness gate (F-004) stays clean.
 
 ---
 

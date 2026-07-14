@@ -47,9 +47,9 @@ Two independent, composable behaviors, keyed off a new optional `key` argument o
 
 ## Readiness gate
 
-- [ ] Test spec `021-protected-immutable-keys-test-spec.md` exists in `docs/tasks/test-specs/`
-- [ ] Confirm no external consumer calls `MemoryGuard.ValidateWrite` outside this repo (the variadic signature change is source-compatible for in-repo Go call sites; any out-of-repo binding would need re-generation; in-repo only today, per `AGENTS.md`'s reusability note)
-- [ ] Decide (and record in the ADR) whether `write`/`read` CLI demo subcommands gain `key` support. **Default answer: no**, they stay unkeyed one-shot demos; only the IPC `serve` path exercises `key` in this task
+- [x] Test spec `021-protected-immutable-keys-test-spec.md` exists in `docs/tasks/test-specs/`
+- [x] Confirm no external consumer calls `MemoryGuard.ValidateWrite` outside this repo (the variadic signature change is source-compatible for in-repo Go call sites; any out-of-repo binding would need re-generation; in-repo only today, per `AGENTS.md`'s reusability note)
+- [x] Decide (and record in the ADR) whether `write`/`read` CLI demo subcommands gain `key` support. **Decided: no** (ADR-017), they stay unkeyed one-shot demos; only the IPC `serve` path exercises `key` in this task
 
 ## Acceptance criteria
 
@@ -85,6 +85,12 @@ Two independent, composable behaviors, keyed off a new optional `key` argument o
 - **Audit-trail emission of key-policy events**: no new `AuditSink` event builder is added; the existing PII-redaction/injection-rejection emission is unaffected. A future task can extend `audit.go` symmetrically once this task's flags are stable.
 - **CLI (`write`/`read` subcommand) support for `--key`**: the one-shot demo commands stay unkeyed; only the IPC `serve` path exercises `key` (see Readiness gate).
 - **Glob-pattern richness beyond `path.Match`** (regex patterns, prefix-only shortcuts): `path.Match`'s stdlib syntax (`*`, `?`, `[...]`) is sufficient for v1; a richer pattern language is a future ask.
+
+## Marker note
+
+TC-012 (ADR + spec propagation) is asserted by `TestKeysTC012_ADRAndSpecPropagation`
+(`keys_docs_test.go`), which reads ADR-017 and the five spec files and fails if the two-tier
+ownership boundary, the durability limitation, or the new flag values are missing.
 
 ## Dependencies
 

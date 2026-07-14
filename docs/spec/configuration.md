@@ -1,7 +1,7 @@
 # Configuration
 
 **Project:** memory-guard
-**Last updated:** 2026-07-12 (task 017: opt-in audit emission via `serve --audit-socket` / `MEMGUARD_AUDIT_SOCKET`, ADR-014; task 015: file-backed store selection, ADR-012)
+**Last updated:** 2026-07-14 (task 021: named-key write-time policy via `MEMGUARD_PROTECTED_KEYS` / `MEMGUARD_IMMUTABLE_KEYS`, ADR-017; task 017: opt-in audit emission via `serve --audit-socket` / `MEMGUARD_AUDIT_SOCKET`, ADR-014; task 015: file-backed store selection, ADR-012)
 
 Every knob the system exposes. memory-guard is configured by **command-line flags** only — there are
 no config files, no application environment variables, and no secrets in v0.
@@ -51,6 +51,8 @@ tracked as a limitation rather than a config knob.
 | `MEMGUARD_STORE_PATH` | absolute path | — | Path to the JSONL store file, **required when `MEMGUARD_STORE=file`** (`file` with no path is a fail-closed construction error, exit `2`, never a silent default location). Ignored for `memory`. The file (and its `<path>.tmp` sibling during a rewrite) is bound mode `0600`. |
 | `MEMGUARD_SELF_REINFORCEMENT` | any \| `off` | on | Off-switch for the `SelfReinforcementDetector` behavioral `WriteInspector` (ADR-016) on the `serve` / `write` path. `off` disables it; any other value (including unset) leaves it on. |
 | `MEMGUARD_SIZE_ANOMALY` | any \| `off` | on | Off-switch for the `SizeAnomalyDetector` behavioral `WriteInspector` (ADR-018) on the `serve` / `write` path. `off` disables it; any other value (including unset) leaves it on. When both behavioral detectors are on they run together, composed via `CombineInspectors`. |
+| `MEMGUARD_PROTECTED_KEYS` | comma-separated `path.Match` globs | — (empty) | Operator-configured **protected** key patterns for the named-key write-time policy (ADR-017), wired into `serve`'s guard via `NewKeyPolicyFromConfig` → `WithKeyPolicy`. An unattested/absent write to a `key` matching one of these globs is flagged `protected_key_violation` but **allowed** (flag-only). Whitespace around each entry is trimmed; empty entries are dropped. A **malformed** glob is a fail-closed construction error (exit `2`, wrapping `path.ErrBadPattern`), never a silently-dropped pattern. Empty/absent leaves only the always-on reserved `memguard:` namespace active. Reserved keys are enforced fail-closed regardless of this var. |
+| `MEMGUARD_IMMUTABLE_KEYS` | comma-separated `path.Match` globs | — (empty) | Operator-configured **immutable** key patterns (ADR-017), same parsing/fail-closed rules as `MEMGUARD_PROTECTED_KEYS`. A `key` matching one of these globs is baselined on its first accepted write; a later write whose redacted content drifts from that pinned baseline is flagged `immutable_mismatch` but **allowed** (flag-only). The baseline registry is in-process only (lost on restart, a documented durability limitation). |
 
 **Hook profile env vars** (consumed by `.claude/scripts/`, not the application):
 - `CLAUDE_HOOK_PROFILE` — `minimal` / `standard` / `strict` (default `standard`)

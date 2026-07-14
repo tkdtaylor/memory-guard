@@ -36,6 +36,18 @@ type MemoryGuard struct {
 	// only the interface, never a concrete implementation, mirroring how it holds Detector and
 	// MemoryStore.
 	inspector WriteInspector
+	// keyPolicy is the operator-configured named-key write-time policy (task 021 / ADR-017): the
+	// glob-pattern lists for the flag-only Protected / Immutable checks. The zero value (empty
+	// lists) still enforces the always-on reserved "memguard:" namespace fail-closed, so a guard
+	// built without WithKeyPolicy still guards reserved keys. Set via WithKeyPolicy.
+	keyPolicy KeyPolicy
+	// baselines is the in-process immutable-baseline registry: a key -> namespaced-SHA-256 map
+	// recording the first-seen redacted-content hash under each immutable-checked key (reserved or
+	// configured). It is allocated in NewMemoryGuard and shared by reference across every builder
+	// copy, so the baseline established on a guard survives builder chaining and every later write.
+	// It is in-process only (lost on restart) — the durability limitation is documented in ADR-017,
+	// mirroring the 009->016 identity-durability precedent. Access is guarded by mu.
+	baselines map[string]string
 }
 
 type entry struct {
@@ -84,7 +96,7 @@ func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard {
 	if s == nil {
 		s = NewInMemoryStore()
 	}
-	return &MemoryGuard{det: det, store: s}
+	return &MemoryGuard{det: det, store: s, baselines: map[string]string{}}
 }
 
 // WithAudit returns a copy of the guard with the given AuditSink wired in (immutable
@@ -96,7 +108,8 @@ func (g *MemoryGuard) WithAudit(cfg AuditConfig) *MemoryGuard {
 	if cfg.isActive() {
 		sink = cfg.Sink
 	}
-	return &MemoryGuard{det: g.det, store: g.store, audit: sink, inspector: g.inspector}
+	return &MemoryGuard{det: g.det, store: g.store, audit: sink, inspector: g.inspector,
+		keyPolicy: g.keyPolicy, baselines: g.baselines}
 }
 
 // WithWriteInspector returns a copy of the guard with the given behavioral WriteInspector wired
@@ -107,7 +120,25 @@ func (g *MemoryGuard) WithAudit(cfg AuditConfig) *MemoryGuard {
 // behavioral inspector; the guard holds only the WriteInspector interface, never the concrete
 // implementation, so no behavioral-backend specifics leak past the seam.
 func (g *MemoryGuard) WithWriteInspector(wi WriteInspector) *MemoryGuard {
-	return &MemoryGuard{det: g.det, store: g.store, audit: g.audit, inspector: wi}
+	return &MemoryGuard{det: g.det, store: g.store, audit: g.audit, inspector: wi,
+		keyPolicy: g.keyPolicy, baselines: g.baselines}
+}
+
+// WithKeyPolicy returns a copy of the guard with the given named-key write-time policy wired in
+// (immutable builder-style, mirroring WithAudit / WithWriteInspector; task 021 / ADR-017). The
+// zero-value KeyPolicy (empty pattern lists) still enforces the always-on reserved "memguard:"
+// namespace fail-closed, so even NewMemoryGuard(det).WithKeyPolicy(KeyPolicy{}) guards reserved
+// keys. It preserves every other already-set field (audit sink, inspector, the shared baseline
+// registry), so it composes with WithAudit and WithWriteInspector in ANY call order without
+// clobbering them. The original guard is unchanged. This is main.go's serve-path injection point
+// for the MEMGUARD_PROTECTED_KEYS / MEMGUARD_IMMUTABLE_KEYS configuration.
+func (g *MemoryGuard) WithKeyPolicy(policy KeyPolicy) *MemoryGuard {
+	baselines := g.baselines
+	if baselines == nil {
+		baselines = map[string]string{}
+	}
+	return &MemoryGuard{det: g.det, store: g.store, audit: g.audit, inspector: g.inspector,
+		keyPolicy: policy, baselines: baselines}
 }
 
 // ValidateWrite is the write-gate: flag poisoning (fail-closed), redact PII, then store.
@@ -118,7 +149,12 @@ func (g *MemoryGuard) WithWriteInspector(wi WriteInspector) *MemoryGuard {
 // (boundKeyFor — the attested Subject(), else the unbound marker). That key is what
 // the read path matches EXACTLY against; the inert free-form map is no longer the
 // basis for isolation. No SPIFFE/X.509 specifics enter here — only Principal.
-func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[string]any {
+// The optional variadic key is a caller-supplied logical slot name (task 021 / ADR-017) used ONLY
+// to run the named-key write-time policy; it is NOT persisted on the entry, not part of the store,
+// and not readable back by key. The variadic form keeps every pre-021 2-arg call site
+// (g.ValidateWrite(text, identity)) compiling and behaving byte-identically: an omitted key (or an
+// empty-string key) matches no reserved or configured pattern and runs zero key-policy logic.
+func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ...string) map[string]any {
 	flags := g.det.DetectInjection(text)
 	redacted, piiFlags := g.det.RedactPII(text)
 	flags = append(flags, piiFlags...)
@@ -139,7 +175,23 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any) map[st
 		emitSafe(g.audit, BuildInjectionRejectedEvent(flags, srcClass))
 		return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
 	}
-	boundKey := boundKeyFor(principalFromMap(identity)) // producer: the identity bound at write
+	p := principalFromMap(identity)
+	boundKey := boundKeyFor(p) // producer: the identity bound at write
+
+	// Named-key write-time policy (task 021 / ADR-017). This runs AFTER the injection gate (so a
+	// poisoned write is already rejected and never reaches here — REQ-009) and BEFORE storage. A
+	// reserved "memguard:" key violation is FAIL-CLOSED (reject, nothing stored); an
+	// operator-configured pattern violation is FLAG-ONLY (allow, flag added). The key is used only
+	// for policy: it is never persisted on the entry. An absent/empty key matches nothing and runs
+	// zero key-policy logic, so pre-021 2-arg call sites are byte-identical.
+	if writeKey := firstKey(key); writeKey != "" {
+		policyFlags, reject := g.evaluateKeyPolicy(writeKey, redacted, p.Attested())
+		flags = append(flags, policyFlags...)
+		if reject {
+			// fail-closed on a reserved-key violation: do not store, mint no id.
+			return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
+		}
+	}
 
 	// Behavioral inspection (task 018 / ADR-016): the opt-in WriteInspector sees the write's
 	// content plus backend-agnostic write metadata (the writer's bound key + the raw source-class

@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 019: `SizeAnomalyDetector` per-key size-baseline in-memory state behind the `WriteInspector` seam, ADR-018; task 018: `SelfReinforcementDetector` per-subject write-history in-memory state behind the `WriteInspector` seam, ADR-016; task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
+**Last updated:** 2026-07-14 (task 021: in-process immutable-baseline registry + `protected_key_violation` / `immutable_mismatch` flag vocabulary, ADR-017; task 019: `SizeAnomalyDetector` per-key size-baseline in-memory state behind the `WriteInspector` seam, ADR-018; task 018: `SelfReinforcementDetector` per-subject write-history in-memory state behind the `WriteInspector` seam, ADR-016; task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -106,6 +106,24 @@ the file is left untouched.
   buffer, then appends it, evicting the oldest once the buffer reaches `WindowSize`. So a single key's
   buffer never exceeds `WindowSize` entries. Bounding the *number of distinct tracked keys* is a noted
   follow-up, not enforced in v0. `WriteContext.SourceClass` is not part of the key and not stored.
+### State: `MemoryGuard.baselines` — the immutable-key baseline registry (task 021 / ADR-017)
+
+- **Shape:** an in-memory `map[string]string` keyed by the caller-supplied logical `key`, mapping to
+  `immutableBaselineHash(redactedContent) = hex(SHA-256("immutable\x00" + content))`: the first-seen
+  redacted-content digest under each immutable-checked key (reserved `memguard:*` or an operator
+  `MEMGUARD_IMMUTABLE_KEYS` glob). It records only the digest, never the content.
+- **Owner:** the `MemoryGuard` value (`guard.go` / `keys.go`), guarded by `MemoryGuard.mu`. It is
+  allocated in `NewMemoryGuard` and shared by reference across every builder copy (`WithAudit` /
+  `WithKeyPolicy` / `WithWriteInspector`), so a baseline established on the guard survives builder
+  chaining. It is **not** part of the persisted `MemoryStore`, never round-trips to disk, and is never
+  returned by any `validate_*` verb.
+- **Lifetime / bounds:** an entry is written on the FIRST accepted write under an immutable-checked key
+  and **never overwritten** by a later mismatching value (the baseline stays pinned to the first-seen
+  hash, so drift is detectable on every subsequent write). A write rejected by the protected check (or
+  by the injection gate) establishes no baseline.
+- **Durability limitation (ADR-017, explicit future work):** the registry is **in-process only** and is
+  lost on restart, so a reserved/immutable key's baseline resets to the first post-restart write. This
+  mirrors task 009's identity model before task 016 made it durable; persisting it is deferred.
 
 ### Type: `entry` (a stored memory record)
 
@@ -276,6 +294,21 @@ The `identity` is the typed principal `{spiffe_id, trust_tier}` (ADR-004), decod
 The stored content is the **redacted** form; the response carries the opaque `stored_id`, **never** the
 raw value. `flags` is `[]` (never `null`) on a clean write with no PII.
 
+The request may also carry an optional top-level `key` (a plain string, ADR-017) for the named-key
+write-time policy. A reserved `memguard:*` key violation (unattested writer or baseline drift) is
+fail-closed like a poisoned write (`{ "allow": false, "stored_id": null, "flags": [… "protected_key_violation" | "immutable_mismatch"] }`);
+an operator-configured `MEMGUARD_PROTECTED_KEYS` / `MEMGUARD_IMMUTABLE_KEYS` glob violation is flag-only
+(`{ "allow": true, "stored_id": "mem-…", "flags": [… "protected_key_violation" | "immutable_mismatch"] }`).
+The `key` is never persisted on the entry. The `{allow, stored_id, flags}` response shape is unchanged;
+the two new flag strings are additive values in the existing `flags` array.
+
+**`flags` vocabulary (all additive values in the same array):** `pii:<LABEL>` (a PII category was
+redacted, `validate_write` / `validate_read`), `injection_suspected` (fail-closed write-gate rejection),
+`self_reinforcement_suspected` (behavioral near-duplicate finding, non-blocking, ADR-016),
+`protected_key_violation` (a protected-key write from an unattested/absent writer, ADR-017), and
+`immutable_mismatch` (a keyed write whose redacted content drifts from the pinned baseline, ADR-017).
+Reserved-key violations reject; operator-configured violations flag-and-allow.
+
 ### Format: `validate_read` request / response
 
 ```json
@@ -358,6 +391,14 @@ All current errors are `retryable:false`. Codes:
   persisted.
 - **No poisoned content is stored.** A write flagged `injection_suspected` stores nothing — the store
   contains only content that passed the write-gate.
+- **No reserved-key violation is stored (ADR-017).** A write to a `memguard:*` reserved key from an
+  unattested/absent writer (`protected_key_violation`), or one whose redacted content drifts from the
+  pinned baseline (`immutable_mismatch`), is rejected fail-closed and stores nothing. The injection gate
+  runs first, so a write that trips both injection and a key violation is rejected via the injection
+  path and establishes no baseline. Operator-configured key violations are flag-only and DO persist.
+- **The immutable baseline is pinned to the first value.** Once established, a key's baseline is never
+  advanced by a later mismatching write, so drift is detectable on every subsequent write, not just the
+  first. The `key` itself is never stored on the entry.
 - **The agent never receives the raw stored value.** A successful `validate_write` returns the opaque
   `stored_id` (`mem-<hex>`, 6 random bytes from `crypto/rand`, hex-encoded); the content is reachable
   only via `validate_read`, redacted.

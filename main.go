@@ -117,6 +117,19 @@ func buildWriteInspector() WriteInspector {
 	}
 }
 
+// buildKeyPolicy constructs the named-key write-time policy from MEMGUARD_PROTECTED_KEYS /
+// MEMGUARD_IMMUTABLE_KEYS (task 021 / ADR-017), exiting 2 on a malformed pattern (fail-closed,
+// mirroring buildStore / buildDetector — never a silent drop that would leave a slot unguarded).
+// The reserved "memguard:" namespace is always active regardless of these env vars.
+func buildKeyPolicy() KeyPolicy {
+	policy, err := NewKeyPolicyFromConfig(os.Getenv("MEMGUARD_PROTECTED_KEYS"), os.Getenv("MEMGUARD_IMMUTABLE_KEYS"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "key-policy:", err)
+		os.Exit(2)
+	}
+	return policy
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: memory-guard <serve|write|read> …")
@@ -137,6 +150,7 @@ func main() {
 		auditPath := resolveAuditSocket(*auditSocket, os.Getenv("MEMGUARD_AUDIT_SOCKET"))
 		guard := NewMemoryGuard(buildDetector(), buildStore()).
 			WithAudit(buildAuditConfig(auditPath)).
+			WithKeyPolicy(buildKeyPolicy()).
 			WithWriteInspector(buildWriteInspector())
 		auditTarget := auditPath
 		if auditTarget == "" {

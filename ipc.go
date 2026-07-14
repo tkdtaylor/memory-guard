@@ -40,7 +40,10 @@ func handleConn(conn net.Conn, guard *MemoryGuard) {
 	identity, _ := req["identity"].(map[string]any)
 	switch req["op"] {
 	case "validate_write":
-		writeJSON(conn, guard.ValidateWrite(str(req["entry"]), identity))
+		// The optional "key" request field carries the caller-supplied logical slot name for the
+		// named-key write-time policy (task 021 / ADR-017). Absent/empty key = today's unkeyed
+		// write (byte-identical behavior); it is a policy input only, never persisted.
+		writeJSON(conn, guard.ValidateWrite(str(req["entry"]), identity, str(req["key"])))
 	case "validate_read":
 		writeJSON(conn, guard.ValidateRead(str(req["query"]), identity))
 	case "verify_delete":
