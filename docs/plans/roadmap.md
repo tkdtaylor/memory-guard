@@ -114,6 +114,18 @@ Detections are returned as `flags` today; emitting them as **OCSF events to `aud
 plannable task once the audit-trail emit contract is consumed here (a soft runtime dep, not a
 build-time blocker). Sequence after the `Detector` backend is settled.
 
+### R3: snapshot / rollback (parked; consider later, not planned)
+The OWASP Agent Memory Guard project (see
+[docs/comparison-owasp-agent-memory-guard.md](../comparison-owasp-agent-memory-guard.md)) ships a
+**versioned snapshot store with point-in-time rollback**: restore memory to a known-good state after a
+poisoning incident, plus a forensic replay of what changed. memory-guard has no equivalent today.
+
+**Parked, not planned.** It is a real capability we lack, but it **partly conflicts with the prove-gone
+stance** of `verify_delete` (rollback can restore what deletion proved absent), so it needs a deliberate
+reconciliation before it becomes work. Revisit if/when the guarded persistent-memory milestone (the
+orchestrator's long-lived goal/fleet state, ADR 042 in agent-builder) needs incident recovery. Recorded
+here so it is not lost; it is **not** in the adopt-task set (tasks 018–023).
+
 ## Notes for the orchestrator
 
 This repo is built out one task at a time by **agent-builder** (and drivable via `/autopilot` /

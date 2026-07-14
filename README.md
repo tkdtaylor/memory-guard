@@ -11,6 +11,8 @@ are verified — proven gone, not merely deleted. It addresses the OWASP Agentic
 & Context Poisoning), the industry gap most memory stores skip. Standalone block in the
 [Secure Agent Ecosystem](https://github.com/tkdtaylor/agent-builder#the-building-blocks), Apache-2.0 licensed.
 
+**Related work.** The OWASP Incubator project [Agent Memory Guard](https://owasp.org/www-project-agent-memory-guard/) addresses the same ASI06 threat with a different stack (a Python package plus framework adapters). See [how the two compare](docs/comparison-owasp-agent-memory-guard.md): same threat, different stack, with memory-guard's delete-verification and read-side redaction as the main differences.
+
 > **Status.** The write-gate, PII redaction, and post-deletion verification are working and
 > tracer-validated over the live IPC server. Pure-Go detectors (`RegexDetector` and `NativeDetector`)
 > ship with the binary; a Presidio-backed detector (sidecar) is built and behind the pluggable seam
