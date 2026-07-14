@@ -82,16 +82,39 @@ func selfReinforcementEnabled() bool {
 	return os.Getenv("MEMGUARD_SELF_REINFORCEMENT") != "off"
 }
 
-// buildWriteInspector constructs the behavioral WriteInspector wired into the serve/write path:
-// a SelfReinforcementDetector with the ADR-016 default parameters (similarity 0.85, cooldown 5m,
-// max self-writes 3). It returns nil when disabled, so WithWriteInspector wires the seam OFF and
-// the guard behaves exactly as pre-task. This is the single wiring call site for the concrete
-// behavioral detector; guard.go / ipc.go only ever see the WriteInspector interface.
+// sizeAnomalyEnabled reports whether the behavioral SizeAnomalyDetector is wired on the
+// serve/write path. It is ON by default; the documented off-switch MEMGUARD_SIZE_ANOMALY=off
+// disables it (any other value, including unset, leaves it on). Task 019 / ADR-018.
+func sizeAnomalyEnabled() bool {
+	return os.Getenv("MEMGUARD_SIZE_ANOMALY") != "off"
+}
+
+// buildWriteInspector constructs the behavioral WriteInspector wired into the serve/write path.
+// Both behavioral detectors are enabled by default and run TOGETHER via CombineInspectors (task
+// 019 / ADR-018), each opt-out through its own env off-switch:
+//   - SelfReinforcementDetector (task 018 / ADR-016): repetitive self-authored writes.
+//   - SizeAnomalyDetector (task 019 / ADR-018): per-key write-size outliers, default config.
+//
+// It returns nil when BOTH are disabled, so WithWriteInspector wires the seam OFF and the guard
+// behaves exactly as pre-task. When exactly one is enabled it returns that detector directly (no
+// needless fan-out). This is the single wiring call site for the concrete behavioral detectors;
+// guard.go / ipc.go only ever see the WriteInspector interface.
 func buildWriteInspector() WriteInspector {
-	if !selfReinforcementEnabled() {
-		return nil
+	var inspectors []WriteInspector
+	if selfReinforcementEnabled() {
+		inspectors = append(inspectors, NewSelfReinforcementDetector())
 	}
-	return NewSelfReinforcementDetector()
+	if sizeAnomalyEnabled() {
+		inspectors = append(inspectors, NewSizeAnomalyDetector(SizeAnomalyConfig{}))
+	}
+	switch len(inspectors) {
+	case 0:
+		return nil
+	case 1:
+		return inspectors[0]
+	default:
+		return CombineInspectors(inspectors...)
+	}
 }
 
 func main() {
@@ -123,8 +146,12 @@ func main() {
 		if !selfReinforcementEnabled() {
 			selfReinforceTarget = "off"
 		}
-		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s, store: %s, audit: %s, self-reinforcement: %s)\n",
-			*socket, detectorBackend(), storeBackend(), auditTarget, selfReinforceTarget)
+		sizeAnomalyTarget := "on"
+		if !sizeAnomalyEnabled() {
+			sizeAnomalyTarget = "off"
+		}
+		fmt.Fprintf(os.Stderr, "memory-guard serving on %s (detector: %s, store: %s, audit: %s, self-reinforcement: %s, size-anomaly: %s)\n",
+			*socket, detectorBackend(), storeBackend(), auditTarget, selfReinforceTarget, sizeAnomalyTarget)
 		if err := serve(*socket, guard); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
