@@ -401,19 +401,29 @@ func TestTC008DeadWireProbe(t *testing.T) {
 }
 
 func TestTC008LiveConstructionPathWiresInspector(t *testing.T) {
-	// Default: the CLI serve/write factory wires a live SelfReinforcementDetector.
+	// Default: the CLI serve/write factory wires a live SelfReinforcementDetector. Task 019 added a
+	// second behavioral detector (SizeAnomalyDetector), also on by default, so the factory now
+	// COMPOSES both via CombineInspectors; the SelfReinforcementDetector is one of the composed
+	// inspectors.
 	wi := buildWriteInspector()
 	if wi == nil {
 		t.Fatal("buildWriteInspector must return a live inspector by default (seam on)")
 	}
-	if _, ok := wi.(*SelfReinforcementDetector); !ok {
-		t.Fatalf("buildWriteInspector default should be *SelfReinforcementDetector, got %T", wi)
+	if !composesSelfReinforcement(wi) {
+		t.Fatalf("buildWriteInspector default must wire a *SelfReinforcementDetector, got %T", wi)
 	}
 
-	// Documented off-switch disables the seam.
+	// Documented off-switch removes the SelfReinforcementDetector from the wiring (the size-anomaly
+	// detector may still be present; this switch governs only self-reinforcement).
 	t.Setenv("MEMGUARD_SELF_REINFORCEMENT", "off")
+	if composesSelfReinforcement(buildWriteInspector()) {
+		t.Fatal("MEMGUARD_SELF_REINFORCEMENT=off must disable the self-reinforcement inspector")
+	}
+
+	// With BOTH behavioral off-switches set, the factory returns nil (seam fully disabled).
+	t.Setenv("MEMGUARD_SIZE_ANOMALY", "off")
 	if buildWriteInspector() != nil {
-		t.Fatal("MEMGUARD_SELF_REINFORCEMENT=off must disable the seam (nil inspector)")
+		t.Fatal("both off-switches must disable the seam entirely (nil inspector)")
 	}
 
 	// Trace producer->consumer: main.go's serve command path calls WithWriteInspector(buildWriteInspector()).
@@ -424,6 +434,23 @@ func TestTC008LiveConstructionPathWiresInspector(t *testing.T) {
 	if !strings.Contains(string(main), "WithWriteInspector(buildWriteInspector())") {
 		t.Fatal("main.go must wire the inspector via WithWriteInspector(buildWriteInspector())")
 	}
+}
+
+// composesSelfReinforcement reports whether wi is, or (via CombineInspectors, task 019) composes,
+// a *SelfReinforcementDetector. It lets the live-factory probe survive the shift from a single
+// inspector to a composed one without weakening the "self-reinforcement is wired" assertion.
+func composesSelfReinforcement(wi WriteInspector) bool {
+	switch v := wi.(type) {
+	case *SelfReinforcementDetector:
+		return true
+	case *combinedInspector:
+		for _, in := range v.inspectors {
+			if _, ok := in.(*SelfReinforcementDetector); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ─── TC-009: seam isolation, no implementation token leaks past the seam ───────

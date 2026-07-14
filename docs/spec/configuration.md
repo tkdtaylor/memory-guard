@@ -49,6 +49,8 @@ tracked as a limitation rather than a config knob.
 | `MEMGUARD_DETECTOR` | `regex` \| `native` \| `presidio` | `native` | Selects the `Detector` backend at construction (`main.go` → `NewDetectorFromConfig`). `native` (default) = the Go-native in-process backend (ADR-002, `< 1 ms` hot path). `regex` = the v0 RegexDetector. `presidio` = the opt-in Presidio-backed sidecar (ADR-009, milliseconds/op, richer PII/NER recall). An unknown value is a fail-closed construction error, exit `2` — never a silent fallback. The value names a backend STRING only; no backend Go type leaks into the seam-protected files. |
 | `MEMGUARD_STORE` | `memory` \| `file` | `memory` | Selects the `MemoryStore` backend at construction (`main.go` → `NewStoreFromConfig`). `memory` (default) = the ephemeral in-memory map (`InMemoryStore`), unchanged v0 behavior. `file` = the persistent file-backed adapter (`FileStore`, ADR-012): a JSONL snapshot rewritten atomically on every mutation, read through to disk on every verb, so `verify_delete`'s absence proof and the residue scan run against real persistence. An unknown value is a fail-closed construction error, exit `2` (never a silent fallback). The value names a backend STRING only; no store Go type leaks into the seam-protected files. |
 | `MEMGUARD_STORE_PATH` | absolute path | — | Path to the JSONL store file, **required when `MEMGUARD_STORE=file`** (`file` with no path is a fail-closed construction error, exit `2`, never a silent default location). Ignored for `memory`. The file (and its `<path>.tmp` sibling during a rewrite) is bound mode `0600`. |
+| `MEMGUARD_SELF_REINFORCEMENT` | any \| `off` | on | Off-switch for the `SelfReinforcementDetector` behavioral `WriteInspector` (ADR-016) on the `serve` / `write` path. `off` disables it; any other value (including unset) leaves it on. |
+| `MEMGUARD_SIZE_ANOMALY` | any \| `off` | on | Off-switch for the `SizeAnomalyDetector` behavioral `WriteInspector` (ADR-018) on the `serve` / `write` path. `off` disables it; any other value (including unset) leaves it on. When both behavioral detectors are on they run together, composed via `CombineInspectors`. |
 
 **Hook profile env vars** (consumed by `.claude/scripts/`, not the application):
 - `CLAUDE_HOOK_PROFILE` — `minimal` / `standard` / `strict` (default `standard`)
@@ -85,6 +87,28 @@ operator decision (pip hash-pinning mitigates the sole-source-of-integrity note)
 backend falls back to native structured redaction — PII is **still redacted, never passed through
 raw** — and surfaces no Presidio-typed error past the seam. The `native` default backend has no such
 dependency and is unaffected.
+
+---
+
+## Behavioral write-inspector configuration
+
+The two behavioral `WriteInspector` detectors (ADR-016, ADR-018) are on by default on the `serve` /
+`write` path and toggled by the `MEMGUARD_SELF_REINFORCEMENT` / `MEMGUARD_SIZE_ANOMALY` env vars above.
+On the CLI path they run with their code defaults (no per-knob env or flag surface in v0); the knobs
+below are set through the constructors (`NewSelfReinforcementDetector` options, `NewSizeAnomalyDetector(SizeAnomalyConfig{})`)
+and are what tests and any embedding caller tune.
+
+**`SizeAnomalyDetector` (`SizeAnomalyConfig`, ADR-018):**
+
+| Knob | Type | Default | Effect |
+|------|------|---------|--------|
+| `WindowSize` | int | `20` | Number of most-recent write sizes retained per key (the bounded ring-buffer capacity). Older sizes are evicted once full. A non-positive value resolves to the default. |
+| `SigmaThreshold` | float64 | `3.0` | Number of population standard deviations from the key's rolling mean beyond which a write is flagged (strict `>`). A non-positive value resolves to the default. |
+| `MinSamples` | int | `5` | Minimum prior samples a key's buffer must already hold before any write can be flagged (cold-start guard). A non-positive value resolves to the default. |
+
+A zero-value `SizeAnomalyConfig{}` resolves every field to its default, so the detector is never
+misconfigured into a divide-by-zero or an always-flagging state. The detector sizes on `len(content)`
+and never consults the write's source class.
 
 ---
 

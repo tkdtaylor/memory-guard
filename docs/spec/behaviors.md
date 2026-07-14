@@ -333,6 +333,47 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   `TestSelfReinforcementHarnessL5` (recall + precision in one run), `TestSelfReinforcementOverSocket`
   (flag observed on the live socket).)*
 
+### B-011: Flag a size anomaly on a write outsized relative to its key's own history (task 019 / ADR-018)
+
+- **Trigger:** a `validate_write` accepted by the write-gate (past the injection check) when the guard
+  is wired with the `SizeAnomalyDetector` behavioral `WriteInspector`. The CLI `serve` / `write` path
+  wires it by default alongside `SelfReinforcementDetector` (composed via `CombineInspectors`); the
+  off-switch is `MEMGUARD_SIZE_ANOMALY=off`. A guard built without the inspector never exhibits this
+  behavior.
+- **Response:** the detector sizes the write on `len(content)` and keeps a bounded ring buffer of the
+  `WindowSize` most recent sizes per `WriteContext.Key`. It adds `size_anomaly_suspected` to `flags`
+  when that key's buffer already holds at least `MinSamples` samples **and** the new size deviates
+  more than `SigmaThreshold` population standard deviations from the buffer's mean (strict `>`). The
+  test runs against the existing buffer, then the new size is appended (compare-then-update), so an
+  anomalous write never dilutes the baseline it is judged against. Defaults: `WindowSize 20`,
+  `SigmaThreshold 3.0`, `MinSamples 5`; a zero-value config resolves to these.
+- **Cold-start and zero-variance:** the first `MinSamples - 1` writes for a fresh key never flag,
+  regardless of size spread (the buffer is still seeding). When every prior sample is identical
+  (`stddev == 0`), any size other than the mean flags and a size equal to the mean does not.
+- **Per-key, provenance-blind:** each key's buffer and statistics are fully independent (including the
+  reserved shared and unbound marker keys, each an ordinary key here). The detector never consults
+  `WriteContext.SourceClass`; only `Key` groups the baselines.
+- **Additive, non-blocking (policy boundary):** the flag is additive on `flags` and never blocks: a
+  write carrying only `size_anomaly_suspected` is still `{ "allow": true, "stored_id": "mem-…" }`,
+  stored as usual. The `validate_write` shape stays byte-for-byte `{allow, stored_id, flags}`. Whether
+  a size anomaly should block, quarantine, or escalate is a policy-engine decision, deferred to the
+  future quarantine-outcome task (task 022). The fail-closed injection path is untouched: a rejected
+  poisoned write never reaches the inspector, never carries the flag, and never enters the size
+  baseline.
+- **Bounded memory:** the per-key ring buffer holds at most `WindowSize` sizes, evicting the oldest at
+  capacity, so one key's history cannot grow without bound. It is detection-internal working state, not
+  part of the persisted `MemoryStore`, and not durable across a process restart.
+- **Composition:** `CombineInspectors` fans one accepted write out to every wrapped inspector in order
+  and returns the deduplicated, order-stable union of their flags, so `SizeAnomalyDetector` runs
+  alongside `SelfReinforcementDetector` behind the single `WithWriteInspector` field.
+- **Seam isolation:** the flag is produced entirely behind the `WriteInspector` seam; no implementation
+  specifics appear in `guard.go`, `ipc.go`, or the contract, and `docs/CONTRACT.md` needs no edit (the
+  `flags []string` shape already admits new string values).
+  *(Tests: `TestTC001SizeCompareThenUpdate` through `TestTC011SizeSpecPropagation`, covering
+  compare-then-update ordering, config defaults, the sigma boundary and zero-variance edge, cold-start,
+  per-key isolation, the unchanged `validate_write` shape, `CombineInspectors` fan-out, disabled-by-default
+  parity, and concurrency under `-race`.)*
+
 ---
 
 > **v0 scope note.** The store is an in-memory map and the detector is regex; reads are now

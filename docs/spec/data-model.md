@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 018: `SelfReinforcementDetector` per-subject write-history in-memory state behind the `WriteInspector` seam, ADR-016; task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
+**Last updated:** 2026-07-14 (task 019: `SizeAnomalyDetector` per-key size-baseline in-memory state behind the `WriteInspector` seam, ADR-018; task 018: `SelfReinforcementDetector` per-subject write-history in-memory state behind the `WriteInspector` seam, ADR-016; task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -90,6 +90,22 @@ the file is left untouched.
   a single identity's history cannot grow without limit: records older than the cooldown window are
   evicted on each `Inspect`, and a hard per-subject size cap trims the oldest records. Bounding the
   *number of distinct tracked identities* is a noted follow-up, not enforced in v0.
+
+### State: `SizeAnomalyDetector` per-key size baseline (behind the `WriteInspector` seam, task 019 / ADR-018)
+
+- **Shape:** an in-memory `map[string][]int` keyed by the writer's bound identity key (`WriteContext.Key`),
+  where each value is a bounded, insertion-ordered ring buffer of the `WindowSize` most recent write
+  sizes in bytes (`len(content)`). It records the minimal state needed to detect `size_anomaly_suspected`
+  (a per-key rolling mean and population standard deviation); no content, tokens, or timestamps are kept,
+  only the integer sizes.
+- **Owner:** the `SizeAnomalyDetector` value (`detector_size.go`), guarded by its own `sync.Mutex`
+  (independent of `MemoryGuard.mu` and of the self-reinforcement detector's lock). It is
+  **detection-internal working state**, deliberately **not** part of the persisted `MemoryStore`: it
+  never round-trips to disk, is never returned by any `validate_*` verb, and is lost on restart.
+- **Lifetime / bounds:** each accepted `Inspect` call compares the new size against the key's existing
+  buffer, then appends it, evicting the oldest once the buffer reaches `WindowSize`. So a single key's
+  buffer never exceeds `WindowSize` entries. Bounding the *number of distinct tracked keys* is a noted
+  follow-up, not enforced in v0. `WriteContext.SourceClass` is not part of the key and not stored.
 
 ### Type: `entry` (a stored memory record)
 

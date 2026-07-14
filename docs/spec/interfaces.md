@@ -270,12 +270,24 @@ Four extension points exist, all seams behind stable interfaces:
    seam, distinct from the stateless `Detector`. `Inspect(content string, ctx WriteContext) []string`
    sees a write's content plus a `WriteContext` (`{Key, SourceClass}`: the writer's bound identity key
    and the raw source-class hint) and returns **additive, non-blocking** flags. Unlike `Detector`, an
-   implementation may hold state; the shipped `SelfReinforcementDetector` (`self_reinforcement.go`)
-   keeps a bounded per-identity write history and flags `self_reinforcement_suspected` when a write is a
-   token-set near-duplicate of enough recent same-subject writes within a cooldown window. Opt-in via
-   `(*MemoryGuard).WithWriteInspector` (nil = disabled, default); wired live on the `serve` / `write`
-   CLI path, off-switch `MEMGUARD_SELF_REINFORCEMENT=off`. A richer behavioral detector slots in behind
-   this seam with no guard / IPC / contract impact.
+   implementation may hold state. Two implementations ship:
+   - `SelfReinforcementDetector` (`self_reinforcement.go`, ADR-016) keeps a bounded per-identity write
+     history and flags `self_reinforcement_suspected` when a write is a token-set near-duplicate of
+     enough recent same-subject writes within a cooldown window. Off-switch `MEMGUARD_SELF_REINFORCEMENT=off`.
+   - `SizeAnomalyDetector` (`detector_size.go`, ADR-018) keeps a bounded per-key ring buffer of recent
+     write sizes (bytes) and flags `size_anomaly_suspected` when a write's `len(content)` deviates
+     beyond `SigmaThreshold` population standard deviations from that key's rolling mean (compare
+     against the existing buffer, then append). Constructed with `NewSizeAnomalyDetector(SizeAnomalyConfig{WindowSize, SigmaThreshold, MinSamples})`;
+     a zero-value config resolves to the documented defaults. It never consults `ctx.SourceClass`.
+     Off-switch `MEMGUARD_SIZE_ANOMALY=off`.
+
+   `CombineInspectors(inspectors ...WriteInspector) WriteInspector` composes several inspectors behind the
+   single seam field: `Inspect` fans the write out to each in order and returns the order-stable,
+   deduplicated union of their flags, so both shipped detectors run together without `MemoryGuard`
+   gaining a second field. All behavioral flags are opt-in via `(*MemoryGuard).WithWriteInspector`
+   (nil = disabled, default) and wired live on the `serve` / `write` CLI path (both detectors on by
+   default, composed via `CombineInspectors`). A richer behavioral detector slots in behind this seam
+   with no guard / IPC / contract impact.
 
 There is no plugin registry; extension is by source modification behind each seam. A new implementation
 of any seam requires zero changes to `guard.go`, `ipc.go`, `main.go`, or the wire contract.
