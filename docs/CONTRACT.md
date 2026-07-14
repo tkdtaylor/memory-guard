@@ -8,8 +8,13 @@ the socket. The shapes below validated **unchanged** (no field renamed/added/dro
 changed). The detector dimension was validated against the v0 `NativeDetector`; a real-Presidio
 re-validation is a noted follow-up, and the shapes are detector-agnostic behind the `Detector` seam.
 
-- `validate_write(entry, identity) -> { allow, stored_id, flags }` — write-gate: reject
-  suspected poisoning (fail-closed), redact PII, store, return flags.
+- `validate_write(entry, identity, key?) -> { allow, stored_id, flags }` — write-gate: reject
+  suspected poisoning (fail-closed), redact PII, store, return flags. `key` is an **optional** logical
+  slot name for the named-key write-time policy (ADR-017): a reserved `memguard:` key violation
+  (unattested writer or baseline drift) is rejected fail-closed with `protected_key_violation` /
+  `immutable_mismatch`; an operator-configured (`MEMGUARD_PROTECTED_KEYS` / `MEMGUARD_IMMUTABLE_KEYS`)
+  violation adds the same flag but allows the write. The `key` is never persisted. The two new strings
+  are additive values in the existing `flags` array; the response shape is unchanged.
 - `validate_read(query, identity) -> { allow, content_redacted, flags }` — return matching
   content with PII redacted.
 - `verify_delete(id) -> { confirmed, residue_detected, residue_summary?, deletion_hash }` — delete,

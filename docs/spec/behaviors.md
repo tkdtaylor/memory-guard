@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 020: write-provenance `source_class` tag on the write path + audit event, ADR-015; task 016: store-side `ScanScoped` + shared scope + restart-surviving isolation, ADR-013)
+**Last updated:** 2026-07-14 (task 021: named-key write-time policy — reserved `memguard:` fail-closed + operator-configured flag-only, B-011, ADR-017; task 020: write-provenance `source_class` tag on the write path + audit event, ADR-015; task 016: store-side `ScanScoped` + shared scope + restart-surviving isolation, ADR-013)
 
 What the system does, observably — triggering condition, response, externally-visible side effects,
 failure modes. The "you can verify this from outside the process" view.
@@ -332,6 +332,41 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   *(Tests: `TestTC001SeamIsDistinctFromDetector` through `TestTC011ADRAndSpecPropagation`,
   `TestSelfReinforcementHarnessL5` (recall + precision in one run), `TestSelfReinforcementOverSocket`
   (flag observed on the live socket).)*
+
+### B-011: Named-key write-time policy — protected / immutable keys (task 021 / ADR-017)
+
+- **Trigger:** a `validate_write` that carries an optional logical `key` (the IPC `key` request field,
+  or the variadic `key` argument to `MemoryGuard.ValidateWrite`). The write must first clear the
+  injection gate (B-001): the key policy runs **only on the accepted path**, so a poisoned write is
+  rejected via the existing injection path and never reaches the key policy (and establishes no
+  baseline). An absent/empty `key` runs zero key-policy logic (byte-identical to a pre-021 write).
+- **Two tiers:** the guard classifies the key.
+  - **Reserved system** — the hard-coded, non-configurable prefix `memguard:` (`isReservedSystemKey`, a
+    prefix match, so `user-memguard:note` is not reserved) — is enforced **fail-closed**. An
+    unattested/absent writer is **rejected** (`{ "allow": false, "stored_id": null, "flags": […,
+    "protected_key_violation"] }`, nothing stored). After a reserved key's first accepted write
+    establishes a SHA-256 baseline over the redacted content, a later write whose redacted content
+    hashes differently is **rejected** (`{ "allow": false, "stored_id": null, "flags": […,
+    "immutable_mismatch"] }`, baseline unchanged). Identical content is allowed every time.
+  - **Operator-configured** — a `key` matching a `MEMGUARD_PROTECTED_KEYS` / `MEMGUARD_IMMUTABLE_KEYS`
+    `path.Match` glob — is **flag-only**: the same protected/immutable violation adds the flag but
+    **allows** the write through (`allow: true`, `stored_id` set, entry persists). The baseline stays
+    pinned to the first value, so drift is detectable on every subsequent write, not just the first.
+  - Reserved status takes precedence: a key matching both the reserved prefix and an operator pattern
+    uses reserved (fail-closed) semantics only.
+- **Authorization:** the write-authorization bar is the existing `Principal.Attested()` (ADR-004). No
+  new identity concept, no per-key ACL. An attested writer clears the protected check on any key.
+- **Contract / seam:** the `{allow, stored_id, flags}` response shape is unchanged;
+  `protected_key_violation` and `immutable_mismatch` are additive `flags` values. The `key` is a policy
+  input only: it is **not** persisted on the entry, not part of `MemoryStore`, and not readable back by
+  key. The baseline registry is in-process (lost on restart, a documented durability limitation). The
+  broader allow/redact/block policy for the general (operator-configured) case stays policy-engine's
+  job; memory-guard contributes detection plus a stable flag, and fail-closed enforcement of its own
+  reserved namespace. Only the IPC `serve` path exercises `key`; the `write`/`read` CLI demos stay
+  unkeyed.
+  *(Tests: `TestKeysTC001…TC010`, `TestKeysTC013InjectionRunsBeforeKeyPolicy` in-process,
+  `TestKeysTC011_SocketShapeParity` over the live socket, `TestKeysTC009_*` for the config factory +
+  builder composition.)*
 
 ---
 
