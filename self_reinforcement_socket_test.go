@@ -179,7 +179,9 @@ func TestSelfReinforcementOverSocket(t *testing.T) {
 	if wireHasFlag(wireFlags(t, bare), selfReinforcementFlag) {
 		t.Fatal("bare write must not carry self_reinforcement_suspected")
 	}
-	wantKeys := map[string]bool{"allow": true, "stored_id": true, "flags": true}
+	// state is the task-022 tri-state outcome key (ADR-019), a sanctioned addition to the
+	// validate_write shape; the self-reinforcement flag is still additive and non-blocking.
+	wantKeys := map[string]bool{"allow": true, "stored_id": true, "flags": true, "state": true}
 	got := keySet(bare)
 	for k := range wantKeys {
 		if !got[k] {

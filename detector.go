@@ -41,12 +41,27 @@ type Detector interface {
 	// DetectInjection returns ["injection_suspected"] if the text looks like a
 	// context-poisoning / prompt-injection attempt, else nil.
 	DetectInjection(text string) []string
+	// DetectBorderline returns ["borderline_suspected"] if the text trips a narrow,
+	// genuinely ambiguous signal (task 022 / ADR-019): suspicious enough to isolate but
+	// not certain enough to hard-reject, so the write is quarantined rather than blocked.
+	// It is ADDITIVE and ORTHOGONAL to DetectInjection/RedactPII: a brand-new, single-class
+	// method, not a reuse of the fail-closed injection path. The v0 trigger is a conservative
+	// placeholder default; the quarantine-vs-block-vs-allow decision authority belongs to the
+	// policy-engine block, not memory-guard (ADR-019 policy boundary). Returns nil when the
+	// text carries no borderline signal.
+	DetectBorderline(text string) []string
 }
 
 // RegexDetector is the v0 stand-in for Presidio: a few high-signal recognizers.
 type RegexDetector struct {
 	pii       []labeledPattern
 	injection []*regexp.Regexp
+	// borderline is the narrow, single-class quarantine-trigger pattern set (task 022 /
+	// ADR-019). It is DISJOINT from injection: a match here means "isolate for review", not
+	// "reject". v0 ships exactly one conservative pattern (an ambiguous retraction phrase);
+	// growing this into a general classifier is explicitly out of scope (policy-engine owns
+	// the decision). Every pattern must clear the zero-benign-collision bar (REQ-009).
+	borderline []*regexp.Regexp
 }
 
 type labeledPattern struct {
@@ -131,6 +146,17 @@ func NewRegexDetector() *RegexDetector {
 			// sound) re-home to a later pass if a corpus case ever demands them (ADR-010 / REQ-001).
 			regexp.MustCompile(`(?i)\bunrestricted\s+(?:ai|assistant|model|llm|chatbot|gpt|bot)\b`),
 		},
+		borderline: []*regexp.Regexp{
+			// v0 borderline trigger (task 022 / ADR-019): an ambiguous retraction phrase that
+			// reads plausibly as either an ordinary conversational reset or as a light
+			// context-reset/injection attempt. It is DELIBERATELY narrow: it requires the
+			// contiguous "pretend the above / this never happened" phrasing, so it does not
+			// fire on ordinary uses of "pretend" (a game, a hypothetical) nor on "never
+			// happened" alone. This carries zero collision across every existing benign /
+			// hard-negative fixture (REQ-009); it is a conservative placeholder default, NOT a
+			// general injection classifier (policy-engine owns the decision, ADR-019).
+			regexp.MustCompile(`(?i)pretend\s+(?:the\s+above|this)\s+never\s+happened`),
+		},
 	}
 }
 
@@ -158,6 +184,20 @@ func (d *RegexDetector) DetectInjection(text string) []string {
 	for _, decoded := range d.decodeCandidates(text) {
 		if d.matchesInjection(decoded) {
 			return []string{"injection_suspected"}
+		}
+	}
+	return nil
+}
+
+// DetectBorderline returns ["borderline_suspected"] if any narrow borderline pattern fires on
+// the LITERAL text, else nil (task 022 / ADR-019). It runs the borderline pattern set ONLY: it
+// does NOT reuse the injection patterns and does NOT decode-then-rescan, so it is fully
+// orthogonal to DetectInjection. A borderline match isolates a write to quarantine; it never
+// blocks. Empty text never fires.
+func (d *RegexDetector) DetectBorderline(text string) []string {
+	for _, p := range d.borderline {
+		if p.MatchString(text) {
+			return []string{"borderline_suspected"}
 		}
 	}
 	return nil
@@ -236,4 +276,11 @@ func (d *NativeDetector) RedactPII(text string) (string, []string) {
 // in-process, no external call.
 func (d *NativeDetector) DetectInjection(text string) []string {
 	return d.base.DetectInjection(text)
+}
+
+// DetectBorderline satisfies the Detector interface (task 022 / ADR-019). It delegates to the
+// same underlying RegexDetector borderline check, in the same spirit DetectInjection delegates:
+// ["borderline_suspected"] or nil, in-process, no external call.
+func (d *NativeDetector) DetectBorderline(text string) []string {
+	return d.base.DetectBorderline(text)
 }

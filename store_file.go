@@ -16,7 +16,7 @@ import (
 // absence proof and the residue scan run against ACTUAL persistence: "the entry is gone"
 // becomes "the bytes are gone from disk-backed state", not "the key is gone from a map".
 //
-// Layout: one JSON object per line ({id, content, bound_identity, source_class?, flags}). Every mutation
+// Layout: one JSON object per line ({id, content, bound_identity, source_class?, flags, quarantined}). Every mutation
 // (Put/Delete) rewrites the WHOLE snapshot crash-safely (temp file + fsync + atomic
 // os.Rename over the canonical path, mode 0600), so a delete PHYSICALLY removes the
 // deleted entry's bytes from the canonical path — an append-only log would leave them as
@@ -44,14 +44,22 @@ type fileRecord struct {
 	// pre-existing snapshots byte-identical when the field is empty.
 	SourceClass string   `json:"source_class,omitempty"`
 	Flags       []string `json:"flags"`
+	// Quarantined carries the task-022 quarantine tier bit (ADR-019) so an entry isolated at
+	// write time stays isolated across a process restart, exactly like BoundIdentity persists the
+	// identity binding. A record written before this field existed has no quarantined key, which
+	// unmarshals to false (an ordinary readable entry) with no backfill migration. It is NOT
+	// omitempty: the field is written explicitly (true AND false) so a restart preserves the
+	// distinction between a stored ordinary entry and a stored quarantined one, and TC-001's raw
+	// on-disk positive control can assert "quarantined":true / "quarantined":false verbatim.
+	Quarantined bool `json:"quarantined"`
 }
 
 func (r fileRecord) toEntry() entry {
-	return entry{content: r.Content, boundIdentity: r.BoundIdentity, sourceClass: r.SourceClass, flags: r.Flags}
+	return entry{content: r.Content, boundIdentity: r.BoundIdentity, sourceClass: r.SourceClass, flags: r.Flags, quarantined: r.Quarantined}
 }
 
 func recordFrom(id string, e entry) fileRecord {
-	return fileRecord{ID: id, Content: e.content, BoundIdentity: e.boundIdentity, SourceClass: e.sourceClass, Flags: e.flags}
+	return fileRecord{ID: id, Content: e.content, BoundIdentity: e.boundIdentity, SourceClass: e.sourceClass, Flags: e.flags, Quarantined: e.quarantined}
 }
 
 // FileStore is the file-backed MemoryStore adapter. It holds ONLY the canonical path; all

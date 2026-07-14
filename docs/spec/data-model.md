@@ -1,7 +1,7 @@
 # Data Model
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 021: in-process immutable-baseline registry + `protected_key_violation` / `immutable_mismatch` flag vocabulary, ADR-017; task 019: `SizeAnomalyDetector` per-key size-baseline in-memory state behind the `WriteInspector` seam, ADR-018; task 018: `SelfReinforcementDetector` per-subject write-history in-memory state behind the `WriteInspector` seam, ADR-016; task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
+**Last updated:** 2026-07-14 (task 022: `entry.quarantined` field + `fileRecord.quarantined` persisted bit + `borderline_suspected` flag vocabulary, ADR-019; task 021: in-process immutable-baseline registry + `protected_key_violation` / `immutable_mismatch` flag vocabulary, ADR-017; task 019: `SizeAnomalyDetector` per-key size-baseline in-memory state behind the `WriteInspector` seam, ADR-018; task 018: `SelfReinforcementDetector` per-subject write-history in-memory state behind the `WriteInspector` seam, ADR-016; task 020: `entry.sourceClass` write-provenance field + `OCSFFinding.SourceClass`, ADR-015; task 016: `ScanScoped` verb + shared-scope marker + `scope` identity field, ADR-013; task 015: persistent `FileStore` backing, ADR-012)
 
 What data exists, how it's structured, and the wire formats crossing the process boundary. The store
 sits behind the **`MemoryStore` seam** (`store.go`, ADR-005) — the guard talks to it only through the
@@ -29,19 +29,24 @@ about disk-backed state rather than a map. It slots in behind the **unchanged `M
 
 ### Format: persisted store record (`FileStore`, internal to `store_file.go`)
 
-One JSON object per line; never crosses the `MemoryStore` seam. All three `entry` fields round-trip
-(`bound_identity` is the load-bearing isolation key, task 016 depends on it persisting):
+One JSON object per line; never crosses the `MemoryStore` seam. Every `entry` field round-trips
+(`bound_identity` is the load-bearing isolation key, task 016 depends on it persisting; `quarantined`
+is the load-bearing quarantine bit, task 022 depends on it persisting):
 
 ```jsonc
-{"id": "mem-a1b2c3", "content": "<redacted content>", "bound_identity": "spiffe://…|\"\"", "flags": ["pii:EMAIL"]}
+{"id": "mem-a1b2c3", "content": "<redacted content>", "bound_identity": "spiffe://…|\"\"", "source_class": "external_tool", "flags": ["pii:EMAIL"], "quarantined": false}
 ```
 
 - **`id`**: the opaque `mem-<hex>` stored id; a record with an empty/absent `id` is a construction
   error (fail-closed, never a zero-value entry).
-- **`content`**: the **redacted** content (raw PII never lands on disk; a poisoned write never reaches
+- **`content`**: the **redacted** content (raw PII never lands on disk; a `block` write never reaches
   disk at all).
 - **`bound_identity`**: the normalized identity key (`""` for an unbound/unattested writer).
-- **`flags`**: the PII/injection metadata (`null`/absent round-trips as nil).
+- **`source_class`**: the write-provenance tag (`omitempty`; absent round-trips as `unknown`, ADR-015).
+- **`flags`**: the PII/injection/borderline metadata (`null`/absent round-trips as nil).
+- **`quarantined`**: the quarantine-tier bit (ADR-019). Written explicitly (`true` AND `false`, not
+  `omitempty`) so a restart preserves the distinction between an ordinary stored entry and a quarantined
+  one; a record written before this field existed has no key, unmarshalling to `false`.
 
 A file that is missing or empty is a valid empty store; an unparseable line is a construction error and
 the file is left untouched.
@@ -132,7 +137,8 @@ type entry struct {
     content       string   // the REDACTED content (PII already <LABEL>-replaced); never the raw value
     boundIdentity string   // the writer's normalized identity key (Principal.Subject() if attested, else "" — the unbound marker); the EXACT key validate_read matches against (ADR-004)
     sourceClass   string   // WRITE PROVENANCE (ADR-015): external_tool|user_input|agent_authored|system, or "unknown" for absent/unrecognized; WHERE the write came from, distinct from WHO (boundIdentity)
-    flags         []string // PII/injection metadata recorded at write (e.g. "pii:EMAIL")
+    flags         []string // PII/injection metadata recorded at write (e.g. "pii:EMAIL", "borderline_suspected")
+    quarantined   bool     // QUARANTINE TIER (ADR-019): true iff the write tripped the borderline signal but not the injection gate; excluded from every validate_read, readable only via review_quarantine. Zero value false = an ordinary readable entry
 }
 ```
 
@@ -156,6 +162,13 @@ type entry struct {
   is the field a future behavioral detector (roadmap 018/019) keys on; this task tags and threads it,
   no policy acts on it yet. An entry read back with `sourceClass == ""` (written before this field
   existed) must be treated the same as `unknown` by consumers.
+- **`quarantined` is the quarantine-tier bit** (ADR-019). It is set ONLY in `ValidateWrite`
+  (`true` iff `DetectBorderline` fired and the injection gate did not) and read in `ValidateRead`'s
+  post-scan exclusion filter and in `ReviewQuarantine`. One write site, two read sites, one derivation:
+  the outcome decided at write is exactly the exclusion applied at read. The zero value (`false`) is an
+  ordinary readable entry, so every pre-022 entry and every non-quarantine write carries `false` with no
+  behavior change. It round-trips through `FileStore` (persisted explicitly, `true` and `false`) so an
+  isolated write stays isolated across a restart.
 
 ### Seam: `MemoryStore` (the storage backend) and its two stdlib adapters
 

@@ -76,9 +76,12 @@ func TestProvenanceTC001_ContractShapeUnchanged(t *testing.T) {
 
 	res := g.ValidateWrite(piiText, idExternalTool)
 	gotWriteKeys := keySet(res)
-	wantWriteKeys := map[string]bool{"allow": true, "stored_id": true, "flags": true}
+	// state is the task-022 tri-state outcome key (ADR-019), a sanctioned addition to the
+	// validate_write shape. This test still guards that the write's PROVENANCE (source_class)
+	// never leaks into the response: state is expected, source_class is not.
+	wantWriteKeys := map[string]bool{"allow": true, "stored_id": true, "flags": true, "state": true}
 	if !reflect.DeepEqual(gotWriteKeys, wantWriteKeys) {
-		t.Fatalf("validate_write response keys = %v, want exactly {allow, stored_id, flags} (no source_class leak)", keysOf(res))
+		t.Fatalf("validate_write response keys = %v, want exactly {allow, stored_id, flags, state} (no source_class leak)", keysOf(res))
 	}
 	if res["allow"] != true {
 		t.Errorf("expected allow:true for a benign PII write, got %v", res["allow"])

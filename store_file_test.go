@@ -521,7 +521,8 @@ func TestFileStoreLiveSocketSelection(t *testing.T) {
 	d := startFileDaemon(t, storePath)
 
 	w := d.call(map[string]any{"op": "validate_write", "entry": "the launch memo veloheliotrope must vanish"})
-	mustKeys(t, "validate_write", w, []string{"allow", "stored_id", "flags"})
+	// state is the task-022 tri-state outcome key (ADR-019), now part of the validate_write shape.
+	mustKeys(t, "validate_write", w, []string{"allow", "stored_id", "flags", "state"})
 	if w["allow"] != true {
 		t.Fatalf("write must be allowed, got %v", w)
 	}

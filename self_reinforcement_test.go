@@ -305,11 +305,13 @@ func TestTC006ContractShapeAdditiveOnly(t *testing.T) {
 		t.Fatalf("expected unflagged benign write, flags=%v", unflagged["flags"])
 	}
 
-	want := map[string]bool{"allow": true, "stored_id": true, "flags": true}
+	// state is the task-022 tri-state outcome key (ADR-019), a sanctioned addition to the
+	// validate_write shape; the self-reinforcement flag stays additive and non-blocking.
+	want := map[string]bool{"allow": true, "stored_id": true, "flags": true, "state": true}
 	for _, out := range []map[string]any{flagged, unflagged} {
 		got := keySet(out)
 		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("validate_write keys = %v, want exactly {allow, stored_id, flags}", keysOf(out))
+			t.Fatalf("validate_write keys = %v, want exactly {allow, stored_id, flags, state}", keysOf(out))
 		}
 		if _, ok := out["flags"].([]string); !ok {
 			t.Fatalf("flags must be []string, got %T", out["flags"])

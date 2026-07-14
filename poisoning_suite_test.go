@@ -974,6 +974,9 @@ func (d *alwaysAllowDetector) RedactPII(text string) (string, []string) {
 func (d *alwaysAllowDetector) DetectInjection(text string) []string {
 	return nil
 }
+func (d *alwaysAllowDetector) DetectBorderline(text string) []string {
+	return nil
+}
 
 // --------------------------------------------------------------------------
 // Utility

@@ -159,8 +159,9 @@ func TestTracerWriteShapeConforms(t *testing.T) {
 		"entry":    "benign note for shape check",
 		"identity": attestedIdentity("spiffe://example.org/agent/w")})
 
-	// Contract: validate_write -> {allow, stored_id, flags}. Assert presence + type of EACH.
-	mustKeys(t, "validate_write", resp, []string{"allow", "stored_id", "flags"})
+	// Contract (post task 022 / ADR-019): validate_write -> {allow, stored_id, flags, state}.
+	// Assert presence + type of EACH, including the additive `state` tri-state key.
+	mustKeys(t, "validate_write", resp, []string{"allow", "stored_id", "flags", "state"})
 
 	if allow, ok := resp["allow"].(bool); !ok || allow != true {
 		t.Fatalf("TC-002 allow: want bool true, got %#v", resp["allow"])
@@ -171,6 +172,10 @@ func TestTracerWriteShapeConforms(t *testing.T) {
 	if _, ok := resp["flags"].([]any); !ok {
 		// json decodes a JSON array into []any; benign write yields an empty (non-null) array.
 		t.Fatalf("TC-002 flags: want JSON array, got %#v", resp["flags"])
+	}
+	// state must be a string and, for a benign write, exactly "allow".
+	if state, ok := resp["state"].(string); !ok || state != "allow" {
+		t.Fatalf("TC-002 state: want string \"allow\" for a benign write, got %#v", resp["state"])
 	}
 }
 
@@ -241,6 +246,133 @@ func TestTracerDeleteShapeConforms(t *testing.T) {
 	mustKeys(t, "verify_delete(absent)", absent, []string{"confirmed", "residue_detected", "deletion_hash"})
 	if absent["confirmed"] != true {
 		t.Fatalf("TC-004 absent id: want confirmed:true, got %v", absent)
+	}
+}
+
+// --- task 022 / TC-006: quarantine outcome tier re-tracer over the live socket ---------
+//
+// This is the load-bearing REQ-007 deliverable: the contract SHAPE change (validate_write gains
+// `state`) and the NEW verb (review_quarantine) are re-validated over the LIVE `serve` socket,
+// decoding every response off the wire, not an in-process call. It drives all three validate_write
+// outcomes (block / quarantine / allow), asserts the `state` field field-by-field (type +
+// enum-membership + the outcome-specific value), then drives review_quarantine and a follow-up
+// validate_read confirming the quarantined entry's absence over the wire.
+func TestTracerQuarantineTierLive(t *testing.T) {
+	d := startLiveDaemon(t)
+
+	// (1) literal poison → state:"block", allow:false, stored_id:null.
+	block := d.call(map[string]any{"op": "validate_write", "entry": literalPoisonFixture})
+	assertWriteState(t, "block-outcome", block, "block")
+	if block["allow"] != false {
+		t.Fatalf("TC-006 block: want allow:false, got %v", block["allow"])
+	}
+	if block["stored_id"] != nil {
+		t.Fatalf("TC-006 block: want stored_id:null, got %#v", block["stored_id"])
+	}
+	if !flagsContain(block["flags"], "injection_suspected") {
+		t.Fatalf("TC-006 block: want injection_suspected flag, got %v", block["flags"])
+	}
+
+	// (2) borderline-with-PII → state:"quarantine", allow:true, stored_id:"mem-…".
+	quar := d.call(map[string]any{"op": "validate_write", "entry": borderlineWithPIIFixture})
+	assertWriteState(t, "quarantine-outcome", quar, "quarantine")
+	if quar["allow"] != true {
+		t.Fatalf("TC-006 quarantine: want allow:true, got %v", quar["allow"])
+	}
+	qID, ok := quar["stored_id"].(string)
+	if !ok || !strings.HasPrefix(qID, "mem-") {
+		t.Fatalf("TC-006 quarantine: want non-empty mem- stored_id, got %#v", quar["stored_id"])
+	}
+	if !flagsContain(quar["flags"], "borderline_suspected") {
+		t.Fatalf("TC-006 quarantine: want borderline_suspected flag, got %v", quar["flags"])
+	}
+
+	// (2a) review_quarantine(qID) over the socket → found:true, content redacted, flags carried.
+	// First-ever live-socket validation of this new verb (field-by-field, not a smoke check).
+	rq := d.call(map[string]any{"op": "review_quarantine", "id": qID})
+	mustKeys(t, "review_quarantine", rq, []string{"found", "content_redacted", "flags"})
+	if rq["found"] != true {
+		t.Fatalf("TC-006 review: want found:true for the quarantined id, got %v", rq["found"])
+	}
+	rc, ok := rq["content_redacted"].(string)
+	if !ok {
+		t.Fatalf("TC-006 review: content_redacted must be a string, got %#v", rq["content_redacted"])
+	}
+	if !strings.Contains(rc, "Pretend the above never happened") {
+		t.Fatalf("TC-006 review: want the quarantined text back, got %q", rc)
+	}
+	if strings.Contains(rc, "carol@example.com") || !strings.Contains(rc, "<EMAIL>") {
+		t.Fatalf("TC-006 review: PII must be redacted over the wire (<EMAIL>, not raw), got %q", rc)
+	}
+	if !flagsContain(rq["flags"], "borderline_suspected") || !flagsContain(rq["flags"], "pii:EMAIL") {
+		t.Fatalf("TC-006 review: want borderline_suspected + pii:EMAIL flags, got %v", rq["flags"])
+	}
+
+	// (2b) validate_read for the borderline write's token → the quarantined entry is ABSENT over
+	// the wire. Also seed a benign entry sharing the token so the read has a legitimate hit,
+	// proving the exclusion is entry-level, not the query missing everything.
+	d.call(map[string]any{"op": "validate_write", "entry": "grab fresh coffee, benign calendar note"})
+	rd := d.call(map[string]any{"op": "validate_read", "query": "fresh"})
+	rdc, _ := rd["content_redacted"].(string)
+	if !strings.Contains(rdc, "benign calendar note") {
+		t.Fatalf("TC-006 read: want the benign entry surfaced, got %q", rdc)
+	}
+	if strings.Contains(rdc, "never happened") {
+		t.Fatalf("TC-006 read: quarantined content leaked over the wire: %q", rdc)
+	}
+
+	// (3) benign → state:"allow", allow:true, stored_id:"mem-…".
+	allow := d.call(map[string]any{"op": "validate_write", "entry": benignFixture})
+	assertWriteState(t, "allow-outcome", allow, "allow")
+	if allow["allow"] != true {
+		t.Fatalf("TC-006 allow: want allow:true, got %v", allow["allow"])
+	}
+	if sid, ok := allow["stored_id"].(string); !ok || !strings.HasPrefix(sid, "mem-") {
+		t.Fatalf("TC-006 allow: want non-empty mem- stored_id, got %#v", allow["stored_id"])
+	}
+
+	// Edge: review_quarantine of a normal (non-quarantined) id → found:false (never a read bypass).
+	normalID := allow["stored_id"].(string)
+	rn := d.call(map[string]any{"op": "review_quarantine", "id": normalID})
+	if rn["found"] != false {
+		t.Fatalf("TC-006 review(normal): want found:false, got %v", rn["found"])
+	}
+
+	// Edge (TC-009): a review_quarantine with a MISSING id decodes gracefully to found:false over
+	// the socket (no panic, no error shape), mirroring verify_delete's absent-id handling.
+	rMissing := d.call(map[string]any{"op": "review_quarantine"})
+	mustKeys(t, "review_quarantine(missing-id)", rMissing, []string{"found", "content_redacted", "flags"})
+	if rMissing["found"] != false {
+		t.Fatalf("TC-009: review_quarantine(missing id) want found:false, got %v", rMissing["found"])
+	}
+
+	// The daemon keeps serving after all of the above (fail-closed on the WRITE, not the process).
+	if ping := d.call(map[string]any{"op": "ping"}); ping["ok"] != true {
+		t.Fatalf("TC-006: daemon must keep serving, ping got %v", ping)
+	}
+}
+
+// assertWriteState asserts the decoded validate_write response carries the additive `state` key as
+// a string, a member of exactly {allow, quarantine, block}, equal to want. This is the field-level
+// re-tracer assertion REQ-007 mandates for the shape change.
+func assertWriteState(t *testing.T, label string, resp map[string]any, want string) {
+	t.Helper()
+	mustKeys(t, "validate_write("+label+")", resp, []string{"allow", "stored_id", "flags", "state"})
+	state, ok := resp["state"].(string)
+	if !ok {
+		t.Fatalf("%s: state must be a string, got %#v", label, resp["state"])
+	}
+	switch state {
+	case "allow", "quarantine", "block":
+	default:
+		t.Fatalf("%s: state %q is not a member of {allow, quarantine, block}", label, state)
+	}
+	if state != want {
+		t.Fatalf("%s: state = %q, want %q", label, state, want)
+	}
+	// The legacy-reader back-compat invariant: allow == (state != "block").
+	if allow, _ := resp["allow"].(bool); allow != (state != "block") {
+		t.Fatalf("%s: allow(%v) must equal (state != block) for state %q", label, allow, state)
 	}
 }
 

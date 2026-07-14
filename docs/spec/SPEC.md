@@ -1,7 +1,7 @@
 # memory-guard — Authoritative Spec
 
 **Project:** memory-guard
-**Last updated:** 2026-06-19
+**Last updated:** 2026-07-14 (task 022: quarantine outcome tier, `validate_write` `state` tri-state + `review_quarantine` verb, ADR-019)
 
 ## What this directory is
 
@@ -30,7 +30,7 @@ fix it in the same change.
 | [behaviors.md](behaviors.md) | What the system does — validate_write (the write-gate, fail-closed on poisoning), PII redaction on write and read, validate_read, verify_delete (post-deletion verification), the IPC server, the write/read demos, fail-closed errors |
 | [architecture.md](architecture.md) | C4 element catalog — persons, systems, the binary, its components |
 | [data-model.md](data-model.md) | The in-memory store + entry, the `Detector` seam, the wire shapes (WriteResult/ReadResult/DeleteResult), error shape |
-| [interfaces.md](interfaces.md) | CLI (`serve`/`write`/`read`), the IPC protocol (`validate_write`/`validate_read`/`verify_delete`/`ping`), the `MemoryGuard` + `Detector` public surface |
+| [interfaces.md](interfaces.md) | CLI (`serve`/`write`/`read`), the IPC protocol (`validate_write`/`validate_read`/`review_quarantine`/`verify_delete`/`ping`), the `MemoryGuard` + `Detector` public surface |
 | [configuration.md](configuration.md) | `--socket`, socket permissions, hook profile env vars, no secrets in repo |
 | [fitness-functions.md](fitness-functions.md) | Proposed executable invariants (write-gate fail-closed, PII never stored/returned raw, delete-verified, detector seam isolation, fail-closed errors) |
 
@@ -53,16 +53,22 @@ on the memory hot path). **Apache-2.0.**
 > [ADR-008](../architecture/decisions/008-contract-tracer-validation.md)) drives
 > `validate_write → validate_read → verify_delete` over the live `serve` socket against the real
 > `MemoryStore` seam, asserting each verb's response field-by-field on the JSON decoded off the
-> socket. The shapes validated **unchanged**. The detector dimension was validated against the v0
-> `NativeDetector` (Presidio, task 007, is not yet merged); the shapes are detector-agnostic behind
-> the `Detector` seam, and a real-backend re-validation is a noted follow-up.
+> socket. Task 022 (ADR-019) added a third `validate_write` outcome (`state ∈ {allow, quarantine,
+> block}`) and the `review_quarantine` verb, and **re-ran the tracer over the live socket** to
+> validate the new shape (the `state` field for all three outcomes) and the new verb; the other verbs'
+> shapes validated **unchanged**. The detector dimension was validated against the v0 `NativeDetector`
+> (Presidio, task 007, is not yet merged); the shapes are detector-agnostic behind the `Detector`
+> seam, and a real-backend re-validation is a noted follow-up.
 
 ## Top-level invariants
 
 - **The write-gate is fail-closed on suspected poisoning.** `validate_write` runs injection detection
   **before** storage; a write flagged `injection_suspected` is **rejected** (`allow:false`,
-  `stored_id:null`) and never persists. *(Enforced in `guard.go::ValidateWrite`; test
-  `TestWriteGateRejectsSuspectedInjection`. Proposed fitness rule F-001.)*
+  `stored_id:null`, `state:"block"`) and never persists. A third outcome, `state:"quarantine"` (ADR-019),
+  stores a redacted, borderline-flagged write with `quarantined:true` and hides it from every normal
+  `validate_read` (readable only via `review_quarantine`); block wins when both signals fire, and
+  `allow == (state != "block")` always holds. *(Enforced in `guard.go::ValidateWrite`; tests
+  `TestWriteGateRejectsSuspectedInjection`, `TestTC003ValidateWriteThreeWayRouting`. Proposed fitness rule F-001.)*
 - **PII is never stored or returned raw.** `validate_write` redacts via the `Detector` before storing;
   `validate_read` redacts again on the way out. The raw PII never enters the store and never appears in
   a response — it is replaced by `<LABEL>` placeholders. *(Enforced in `guard.go::ValidateWrite` /
