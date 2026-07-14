@@ -60,6 +60,7 @@ func (d *slowDetector) RedactPII(text string) (string, []string) {
 func (d *slowDetector) DetectInjection(text string) []string {
 	return nil
 }
+func (d *slowDetector) DetectBorderline(text string) []string { return nil }
 
 // TestFitnessLatency measures the per-op detection cost on the validate_* hot path.
 //
@@ -142,6 +143,7 @@ type zeroRecallDetector struct{}
 
 func (d *zeroRecallDetector) RedactPII(text string) (string, []string) { return text, nil }
 func (d *zeroRecallDetector) DetectInjection(text string) []string     { return nil }
+func (d *zeroRecallDetector) DetectBorderline(text string) []string    { return nil }
 
 // TestFitnessRecallPrecision runs the write-gate poisoning suite and the PII corpus
 // through ValidateWrite / RedactPII and asserts the documented baseline floors.

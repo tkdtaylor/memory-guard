@@ -72,6 +72,15 @@ type entry struct {
 	// response, provenance is not an access-control key and never gates a read.
 	sourceClass string
 	flags       []string
+	// quarantined marks an entry that ValidateWrite isolated to the quarantine tier (task 022 /
+	// ADR-019): a write that tripped the borderline signal (DetectBorderline) but NOT the
+	// fail-closed injection gate. A quarantined entry IS persisted (redacted, like any write) but
+	// is EXCLUDED from every normal ValidateRead regardless of identity/scope match, and is
+	// retrievable only through ReviewQuarantine. The zero value (false) is an ordinary, readable
+	// entry, so every entry written before this task and every non-quarantine write carries
+	// quarantined:false with no behavior change. It is set ONLY in ValidateWrite; nothing else
+	// writes it, so the quarantine decision at write time is exactly the exclusion at read time.
+	quarantined bool
 }
 
 // NewMemoryGuard wires the guard with a Detector and (optionally) a MemoryStore. Both
@@ -156,8 +165,14 @@ func (g *MemoryGuard) WithKeyPolicy(policy KeyPolicy) *MemoryGuard {
 // empty-string key) matches no reserved or configured pattern and runs zero key-policy logic.
 func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ...string) map[string]any {
 	flags := g.det.DetectInjection(text)
+	// Borderline detection (task 022 / ADR-019) is an ADDITIVE, ORTHOGONAL Detector-seam call,
+	// disjoint from the injection gate. Its flag routes an otherwise-allowable write to the
+	// quarantine tier below; it NEVER blocks (block is the injection gate's job, and block wins
+	// when both fire). Compute it here, once, alongside the other detector calls.
+	borderlineFlags := g.det.DetectBorderline(text)
 	redacted, piiFlags := g.det.RedactPII(text)
 	flags = append(flags, piiFlags...)
+	flags = append(flags, borderlineFlags...)
 
 	// Decode the write's provenance ONCE, here, from the same identity map that binds the
 	// writer's key below. This single value is threaded to BOTH the stored entry and every
@@ -173,7 +188,11 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ..
 		// failure never changes the verdict (fail-open for the sink, fail-closed for the gate).
 		// The provenance still rides the event even though nothing persists.
 		emitSafe(g.audit, BuildInjectionRejectedEvent(flags, srcClass))
-		return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
+		// state:"block" is the tri-state name for the fail-closed reject (task 022 / ADR-019).
+		// allow:false and stored_id:nil are the byte-for-byte-identical decision path to pre-022;
+		// state is the additive tri-state label, with allow == (state != "block"). Block wins even
+		// when the borderline signal also fired (both-signals case).
+		return map[string]any{"allow": false, "stored_id": nil, "state": "block", "flags": flags}
 	}
 	p := principalFromMap(identity)
 	boundKey := boundKeyFor(p) // producer: the identity bound at write
@@ -188,8 +207,11 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ..
 		policyFlags, reject := g.evaluateKeyPolicy(writeKey, redacted, p.Attested())
 		flags = append(flags, policyFlags...)
 		if reject {
-			// fail-closed on a reserved-key violation: do not store, mint no id.
-			return map[string]any{"allow": false, "stored_id": nil, "flags": flags}
+			// fail-closed on a reserved-key violation: do not store, mint no id. A reject maps to
+			// state:"block" so the tri-state invariant allow == (state != "block") holds for EVERY
+			// reject path, not just the injection gate (task 022 / ADR-019). Flag-only key-policy
+			// violations do NOT reject and fall through to the allow/quarantine routing below.
+			return map[string]any{"allow": false, "stored_id": nil, "state": "block", "flags": flags}
 		}
 	}
 
@@ -206,9 +228,20 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ..
 		flags = append(flags, g.inspector.Inspect(text, WriteContext{Key: boundKey, SourceClass: writeProvenanceHint(identity)})...)
 	}
 
+	// Quarantine routing (task 022 / ADR-019): a write that tripped the borderline signal but
+	// cleared the injection gate is stored with quarantined:true and returns state:"quarantine".
+	// A write with neither signal is an ordinary allow (state:"allow", quarantined:false). Both
+	// states persist an entry and mint a stored_id; only block returns stored_id:null. Redaction
+	// already ran on the quarantine path exactly as on the allow path (no special-casing).
+	quarantined := contains(flags, "borderline_suspected")
+	state := "allow"
+	if quarantined {
+		state = "quarantine"
+	}
+
 	g.mu.Lock()
 	id := "mem-" + randHex(6)
-	g.store.Put(id, entry{content: redacted, boundIdentity: boundKey, sourceClass: srcClass, flags: flags})
+	g.store.Put(id, entry{content: redacted, boundIdentity: boundKey, sourceClass: srcClass, flags: flags, quarantined: quarantined})
 	g.mu.Unlock()
 
 	// Emit a PII-redaction event only when PII was actually found (non-empty piiFlags).
@@ -219,7 +252,7 @@ func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ..
 		emitSafe(g.audit, BuildPIIRedactionEvent(flags, id, srcClass))
 	}
 
-	return map[string]any{"allow": true, "stored_id": id, "flags": flagsOrEmpty(flags)}
+	return map[string]any{"allow": true, "stored_id": id, "state": state, "flags": flagsOrEmpty(flags)}
 }
 
 // ValidateRead returns matching content for the READER'S identity, with PII redacted
@@ -246,11 +279,49 @@ func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[st
 	g.mu.Unlock()
 	hits := make([]string, 0, len(scoped))
 	for _, e := range scoped {
+		// Quarantine exclusion (task 022 / ADR-019): a quarantined entry is NEVER visible to a
+		// normal read, regardless of identity/scope match. This post-filter over the scoped set is
+		// the load-bearing exclusion; dropping it would surface quarantined content to a matching
+		// reader (the TC-004 mutation probe asserts this filter is what excludes it, not that the
+		// entry merely happens not to match). Quarantined entries reach the outside only via
+		// ReviewQuarantine.
+		if e.quarantined {
+			continue
+		}
 		hits = append(hits, e.content)
 	}
 	redacted, flags := g.det.RedactPII(strings.Join(hits, "\n"))
 	return map[string]any{"allow": true, "content_redacted": redacted,
 		"flags": flagsOrEmpty(flags)}
+}
+
+// ReviewQuarantine is the explicit, quarantine-ONLY retrieval path for an isolated write (task
+// 022 / ADR-019). It is the single way a quarantined entry (excluded from every ValidateRead)
+// becomes visible again, and only for the exact stored_id.
+//
+// Returns { found, content_redacted, flags }:
+//   - found:false for an unknown id OR an id that exists but is NOT quarantined. The two are
+//     indistinguishable from the response (identical empty shape), so this is never a generic
+//     id-lookup oracle that bypasses ValidateRead's identity scoping: a normal, readable entry
+//     is refused here exactly like a missing id.
+//   - content_redacted is PII-redacted on the way out (defense in depth, same policy as
+//     ValidateRead). The stored content is already redacted at write time; re-redacting is
+//     idempotent and cannot leak raw PII even if the store were ever seeded directly.
+//   - flags are the entry's stored flags (carrying borderline_suspected and any pii:<LABEL>).
+//
+// It is READ-ONLY: it never promotes/demotes a quarantined entry back to normal storage or
+// deletes it (that decision authority is a future policy-engine verb, out of scope here). It
+// does not scope on identity: quarantine is orthogonal to the identity axis, and a quarantined
+// entry is invisible to every normal reader regardless of who wrote it.
+func (g *MemoryGuard) ReviewQuarantine(id string) map[string]any {
+	g.mu.Lock()
+	e, ok := g.store.Get(id)
+	g.mu.Unlock()
+	if !ok || !e.quarantined {
+		return map[string]any{"found": false, "content_redacted": "", "flags": []string{}}
+	}
+	redacted, _ := g.det.RedactPII(e.content)
+	return map[string]any{"found": true, "content_redacted": redacted, "flags": flagsOrEmpty(e.flags)}
 }
 
 // VerifyDelete deletes an entry and PROVES it is gone (post-deletion verification — ADR-001 §5,

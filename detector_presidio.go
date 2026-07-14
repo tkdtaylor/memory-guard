@@ -322,3 +322,10 @@ func (d *PresidioDetector) RedactPII(text string) (string, []string) {
 func (d *PresidioDetector) DetectInjection(text string) []string {
 	return d.native.DetectInjection(text)
 }
+
+// DetectBorderline satisfies the Detector interface (task 022 / ADR-019). Borderline detection,
+// like injection, is ORTHOGONAL to Presidio (a PII/NER engine, not a classifier), so this
+// delegates to the native heuristic UNCHANGED: ["borderline_suspected"] or nil.
+func (d *PresidioDetector) DetectBorderline(text string) []string {
+	return d.native.DetectBorderline(text)
+}

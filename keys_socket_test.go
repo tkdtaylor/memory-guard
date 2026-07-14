@@ -92,7 +92,10 @@ func TestKeysTC011_SocketShapeParity(t *testing.T) {
 	d := startKeyDaemon(t)
 	attested := attestedIdentity("spiffe://secure-agents/agent/ops")
 
-	writeKeys := []string{"allow", "stored_id", "flags"}
+	// state is the task-022 tri-state outcome key (ADR-019), now part of the validate_write
+	// shape on every path: a reserved-key reject carries state:"block", an allow/flag path
+	// carries state:"allow".
+	writeKeys := []string{"allow", "stored_id", "flags", "state"}
 
 	// Branch 1 — reserved key, no identity: rejected, protected_key_violation, stored_id null.
 	r1 := d.call(map[string]any{"op": "validate_write", "entry": contentA, "key": "memguard:policy"})

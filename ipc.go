@@ -48,6 +48,12 @@ func handleConn(conn net.Conn, guard *MemoryGuard) {
 		writeJSON(conn, guard.ValidateRead(str(req["query"]), identity))
 	case "verify_delete":
 		writeJSON(conn, guard.VerifyDelete(str(req["id"])))
+	case "review_quarantine":
+		// review_quarantine(id) -> {found, content_redacted, flags} (task 022 / ADR-019): the
+		// explicit, quarantine-only retrieval path. A missing or non-string "id" decodes to ""
+		// via str(), which Get()s nothing and returns found:false gracefully (no panic), mirroring
+		// verify_delete's handling of an absent id.
+		writeJSON(conn, guard.ReviewQuarantine(str(req["id"])))
 	case "ping":
 		writeJSON(conn, map[string]any{"ok": true})
 	default:

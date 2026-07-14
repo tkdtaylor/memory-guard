@@ -1,7 +1,7 @@
 # Behaviors
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 021: named-key write-time policy, reserved `memguard:` fail-closed + operator-configured flag-only, B-012, ADR-017; task 019: size-anomaly `WriteInspector`, B-011, ADR-018; task 018: self-reinforcement `WriteInspector`, B-010, ADR-016; task 020: write-provenance `source_class` tag on the write path + audit event, ADR-015; task 016: store-side `ScanScoped` + shared scope + restart-surviving isolation, ADR-013)
+**Last updated:** 2026-07-14 (task 022: quarantine outcome tier, `validate_write` `state` tri-state + `borderline_suspected` + `review_quarantine`, B-013, ADR-019; task 021: named-key write-time policy, reserved `memguard:` fail-closed + operator-configured flag-only, B-012, ADR-017; task 019: size-anomaly `WriteInspector`, B-011, ADR-018; task 018: self-reinforcement `WriteInspector`, B-010, ADR-016; task 020: write-provenance `source_class` tag on the write path + audit event, ADR-015; task 016: store-side `ScanScoped` + shared scope + restart-surviving isolation, ADR-013)
 
 What the system does, observably — triggering condition, response, externally-visible side effects,
 failure modes. The "you can verify this from outside the process" view.
@@ -17,14 +17,30 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 
 - **Trigger:** `{"op":"validate_write","entry":…,"identity":{…}}` over IPC, or
   `MemoryGuard.ValidateWrite(text, identity)` in-process (the `write` CLI subcommand).
-- **Response:** the guard runs **injection detection first** (`Detector.DetectInjection`). If the
-  content is flagged `injection_suspected`, the write is **rejected fail-closed** —
-  `{ "allow": false, "stored_id": null, "flags": [ …, "injection_suspected" ] }` — and **nothing is
-  stored**. Otherwise the content is **PII-redacted** (`Detector.RedactPII`, PII → `<LABEL>`
-  placeholders), an opaque `stored_id` of the form `mem-<hex>` is minted from `crypto/rand`, the
-  **redacted** content is inserted into the in-memory store under that id **bound to the writer's
-  identity**, and the guard returns `{ "allow": true, "stored_id": "mem-…", "flags": […] }`. `flags`
-  carries the PII categories found (e.g. `pii:EMAIL`) as informational metadata.
+- **Response (three outcomes, ADR-019):** the guard runs **injection detection first**
+  (`Detector.DetectInjection`). The response carries a `state` field, one of `"allow"` |
+  `"quarantine"` | `"block"`, with `allow == (state != "block")`.
+  - **`block`:** if the content is flagged `injection_suspected` (or a reserved-key policy violation
+    fires, B-012), the write is **rejected fail-closed**:
+    `{ "allow": false, "stored_id": null, "state": "block", "flags": [ …, "injection_suspected" ] }`,
+    and **nothing is stored**. This is the byte-for-byte-unchanged pre-022 reject decision; block wins
+    even when the borderline signal (below) also fires.
+  - **`quarantine`:** if the content is not blocked but trips the narrow, additive borderline signal
+    (`Detector.DetectBorderline` → `borderline_suspected`), the content is **PII-redacted**, an opaque
+    `stored_id` is minted, and the redacted content is stored **with `quarantined:true`**. The guard
+    returns `{ "allow": true, "stored_id": "mem-…", "state": "quarantine", "flags": [ …,
+    "borderline_suspected" ] }`. A quarantined entry is **excluded from every normal `validate_read`**
+    (B-002) and readable only via `review_quarantine` (B-013).
+  - **`allow`:** neither signal fires. The content is **PII-redacted** (`Detector.RedactPII`, PII →
+    `<LABEL>` placeholders), an opaque `stored_id` of the form `mem-<hex>` is minted from `crypto/rand`,
+    the **redacted** content is inserted into the in-memory store under that id **bound to the writer's
+    identity** with `quarantined:false`, and the guard returns `{ "allow": true, "stored_id": "mem-…",
+    "state": "allow", "flags": […] }`. `flags` carries the PII categories found (e.g. `pii:EMAIL`) as
+    informational metadata.
+
+  The borderline signal is a **conservative placeholder default** (ADR-019): its decision authority
+  (what routes to quarantine vs block vs allow) belongs to the policy-engine block, not memory-guard;
+  memory-guard ships the mechanism and a narrow trigger, not a general classifier.
 - **Identity binding (ADR-004 / ADR-013):** the typed `identity` (`{spiffe_id, trust_tier, scope?}`) is
   decoded through the `Principal` seam and the entry records a **normalized bound-identity key** — the
   writer's `Subject()` (the SPIFFE ID) when the principal is **attested**, else the **unbound** marker.
@@ -61,7 +77,9 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   joins the surviving contents with newlines, runs `Detector.RedactPII` over the joined result (defense
   in depth — PII redacted again on read), and returns `{ "allow": true, "content_redacted": "…",
   "flags": […] }`. v0 always returns `allow:true`; `flags` carries any PII categories the read-time
-  redaction found.
+  redaction found. Entries stored with `quarantined:true` (B-001, ADR-019) are **excluded** from this
+  result **regardless of identity/scope match**, via a post-filter over the scoped set; a quarantined
+  write is never visible to a normal read and surfaces only through `review_quarantine` (B-013).
 - **Identity scoping (ADR-004 / ADR-013):** the reader's visible-key set comes from the `Principal`
   seam plus the shared marker:
   - an **attested** reader's keys are `{Subject(), sharedScopeKey}`: it sees entries bound to its
@@ -196,8 +214,13 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
 ## Behavioral invariants
 
 - **No poisoned write persists.** `validate_write` runs injection detection before storage; an
-  `injection_suspected` flag rejects the write (`allow:false`, `stored_id:null`) and nothing enters the
-  store. The write-gate is fail-closed.
+  `injection_suspected` flag rejects the write (`allow:false`, `stored_id:null`, `state:"block"`) and
+  nothing enters the store. The write-gate is fail-closed. Block wins over quarantine when both signals
+  fire (ADR-019).
+- **A quarantined write is never returned by a normal read.** A `borderline_suspected` write is stored
+  with `quarantined:true` (`state:"quarantine"`), excluded from every `validate_read` regardless of
+  identity/scope, and reachable only through `review_quarantine`, which never surfaces a non-quarantined
+  or unknown id (ADR-019, B-013). `allow == (state != "block")` holds on every `validate_write`.
 - **PII is never stored or returned raw.** `validate_write` redacts before storing; `validate_read`
   redacts again on the way out. The raw PII is replaced by `<LABEL>` placeholders and appears in no
   response and in no stored entry.
@@ -407,6 +430,38 @@ Not here: *how* (source), *why* (ADRs), *what data* ([data-model.md](data-model.
   *(Tests: `TestKeysTC001…TC010`, `TestKeysTC013InjectionRunsBeforeKeyPolicy` in-process,
   `TestKeysTC011_SocketShapeParity` over the live socket, `TestKeysTC009_*` for the config factory +
   builder composition.)*
+
+### B-013: Quarantine outcome tier and review-retrieval (`review_quarantine`) (task 022 / ADR-019)
+
+- **Trigger:** a `validate_write` whose content trips the narrow borderline signal
+  (`Detector.DetectBorderline` → `borderline_suspected`) but not the fail-closed injection gate (B-001,
+  `state:"quarantine"`); and, separately, `{"op":"review_quarantine","id":…}` over IPC or
+  `MemoryGuard.ReviewQuarantine(id)` in-process.
+- **Response:** a quarantined write is stored redacted with `quarantined:true` and returns
+  `state:"quarantine"` (B-001), then is **excluded from every normal `validate_read`** (B-002). The
+  quarantine-only retrieval verb `review_quarantine(id)` returns `{ found, content_redacted, flags }`:
+  `found:true` with the PII-redacted content and the entry's stored flags for a quarantined id;
+  `found:false` (identical empty shape `{ "found": false, "content_redacted": "", "flags": [] }`) for an
+  **unknown OR non-quarantined** id. The two are indistinguishable from the response, so the verb is
+  never a generic id-lookup bypass of `validate_read`'s identity scoping. It is **read-only**: no
+  promotion, demotion, or deletion of the quarantined entry.
+- **Policy boundary (ADR-019):** the borderline trigger is a **conservative placeholder default**, not a
+  claim that memory-guard owns injection-classification policy. The decision authority (what routes to
+  quarantine vs block vs allow) belongs to the policy-engine block; a future task wires that decision
+  hook. memory-guard ships the mechanism (isolated store bit, the third outcome, read-exclusion, the
+  review path) and one narrow trigger.
+- **Persistence:** the `quarantined` bit round-trips through `FileStore` across a restart (ADR-012),
+  exactly like the bound-identity key, so an isolated write stays isolated after a process restart.
+- **Side effects:** a quarantined write mutates the store (redacted content + `quarantined:true`). A
+  block write persists nothing. `review_quarantine` is side-effect-free. `verify_delete` scans every
+  backing index unfiltered, so a quarantined entry deletes and residue-scans identically to any other
+  (B-003).
+- **Failure modes:** a missing/non-string `id` to `review_quarantine` is graceful (`found:false`, no
+  panic), mirroring `verify_delete`'s absent-id handling. The fail-closed injection gate is untouched:
+  block always wins over quarantine when both signals fire.
+  *(Tests: `TestTC001…TC010` in `quarantine_test.go` in-process, `TestTracerQuarantineTierLive` over the
+  live socket for all three outcomes plus `review_quarantine` and the read-exclusion, decoded off the
+  wire.)*
 
 ---
 

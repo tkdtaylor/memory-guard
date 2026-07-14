@@ -1,7 +1,7 @@
 # Interfaces
 
 **Project:** memory-guard
-**Last updated:** 2026-07-14 (task 021: optional `validate_write` `key` request field + `protected_key_violation` / `immutable_mismatch` flag values + `KeyPolicy` / `WithKeyPolicy` / `NewKeyPolicyFromConfig`, ADR-017; task 020: optional identity `source_class` write-provenance key + audit `source_class`, ADR-015; task 017: real `AuditTrailSink` transport + `serve --audit-socket` wiring, ADR-014; task 016: `ScanScoped` + identity `scope`, ADR-013)
+**Last updated:** 2026-07-14 (task 022: `validate_write` gains the `state` tri-state outcome field + `review_quarantine(id)` verb + `borderline_suspected` flag value + `validate_read` quarantine exclusion, ADR-019; task 021: optional `validate_write` `key` request field + `protected_key_violation` / `immutable_mismatch` flag values + `KeyPolicy` / `WithKeyPolicy` / `NewKeyPolicyFromConfig`, ADR-017; task 020: optional identity `source_class` write-provenance key + audit `source_class`, ADR-015; task 017: real `AuditTrailSink` transport + `serve --audit-socket` wiring, ADR-014; task 016: `ScanScoped` + identity `scope`, ADR-013)
 
 The system's contact surface — what calls in, what it calls out to, and the internal public boundary.
 Each is a stable contract; changes here are breaking changes.
@@ -64,12 +64,23 @@ persisted on the entry, not part of `MemoryStore`, and not readable back by key.
 precedence over any operator pattern. Only the IPC `serve` path carries `key`; the `write`/`read` CLI
 demo subcommands stay unkeyed.
 
+`validate_write` has three outcomes (ADR-019), reported in the `state` field (`"allow"` | `"quarantine"`
+| `"block"`) with `allow == (state != "block")` for legacy-reader back-compat. `block` is the
+fail-closed reject (suspected injection or a reserved-key violation): nothing persists, `stored_id` is
+null. `quarantine` is a write that tripped the narrow, additive borderline signal
+(`borderline_suspected`, a conservative placeholder default whose decision authority belongs to
+policy-engine, not memory-guard): it is stored redacted with `quarantined:true`, excluded from every
+normal `validate_read`, and retrievable only through the new `review_quarantine(id)` verb. `allow` is
+an ordinary readable write. Both `allow` and `quarantine` mint a `mem-…` `stored_id`; only `block`
+returns null.
+
 | Op | Request | Response |
 |----|---------|----------|
 | `ping` | `{"op":"ping"}` | `{"ok":true}` |
-| `validate_write` | `{"op":"validate_write","entry":…,"key"?:"memguard:… \| config:… \| …","identity":{"spiffe_id":…,"trust_tier":…,"scope"?:"shared"}}` | clean: `{"allow":true,"stored_id":"mem-…","flags":[…]}` · poisoned: `{"allow":false,"stored_id":null,"flags":[…,"injection_suspected"]}` · reserved-key violation: `{"allow":false,"stored_id":null,"flags":[…,"protected_key_violation" \| "immutable_mismatch"]}` · configured-key violation: `{"allow":true,"stored_id":"mem-…","flags":[…,"protected_key_violation" \| "immutable_mismatch"]}` — **the raw value is never returned; a poisoned or reserved-key-violating write never persists; the optional `key` is a policy input only, never stored; the entry is bound to the writer's identity key** (the reserved shared marker iff attested **and** `scope=="shared"`, else the writer's `spiffe_id` / the unbound marker) |
-| `validate_read` | `{"op":"validate_read","query":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — contents matching the query **AND** the reader's visible-key set, joined and **PII-redacted on the way out**. An attested reader sees its **exact** `spiffe_id`'s entries **plus shared-scope entries**; an unattested/absent reader sees **unbound** entries **plus shared-scope entries** (never an identity-bound entry, never the whole store). Scoping is a single store-side `ScanScoped` call (ADR-013) |
-| `verify_delete` | `{"op":"verify_delete","id":…}` | `{"confirmed":true,"residue_detected":bool,"residue_summary"?:…,"deletion_hash":…}` — fresh post-delete presence check **plus** a residue scan of the remaining store; `residue_summary` present only when `residue_detected:true`; `deletion_hash` is a deterministic SHA-256 of the deletion op |
+| `validate_write` | `{"op":"validate_write","entry":…,"key"?:"memguard:… \| config:… \| …","identity":{"spiffe_id":…,"trust_tier":…,"scope"?:"shared"}}` | `{allow, stored_id, flags, state}` with `state ∈ {"allow","quarantine","block"}` and `allow == (state != "block")` (ADR-019). clean: `{"allow":true,"stored_id":"mem-…","state":"allow","flags":[…]}` · quarantine (borderline): `{"allow":true,"stored_id":"mem-…","state":"quarantine","flags":[…,"borderline_suspected"]}` · poisoned: `{"allow":false,"stored_id":null,"state":"block","flags":[…,"injection_suspected"]}` · reserved-key violation: `{"allow":false,"stored_id":null,"state":"block","flags":[…,"protected_key_violation" \| "immutable_mismatch"]}` · configured-key violation: `{"allow":true,"stored_id":"mem-…","state":"allow","flags":[…,"protected_key_violation" \| "immutable_mismatch"]}`. **The raw value is never returned; a `block` write never persists; a `quarantine` write is stored redacted with `quarantined:true`, excluded from every `validate_read`, and readable only via `review_quarantine`; block wins when both the injection and borderline signals fire; the optional `key` is a policy input only, never stored; the entry is bound to the writer's identity key** (the reserved shared marker iff attested **and** `scope=="shared"`, else the writer's `spiffe_id` / the unbound marker) |
+| `validate_read` | `{"op":"validate_read","query":…,"identity":{"spiffe_id":…,"trust_tier":…}}` | `{"allow":true,"content_redacted":…,"flags":[…]}` — contents matching the query **AND** the reader's visible-key set, joined and **PII-redacted on the way out**. An attested reader sees its **exact** `spiffe_id`'s entries **plus shared-scope entries**; an unattested/absent reader sees **unbound** entries **plus shared-scope entries** (never an identity-bound entry, never the whole store). Entries with `quarantined:true` are **excluded regardless of identity/scope match** (ADR-019). Scoping is a single store-side `ScanScoped` call (ADR-013) |
+| `review_quarantine` | `{"op":"review_quarantine","id":…}` | `{"found":bool,"content_redacted":…,"flags":[…]}` — the explicit **quarantine-only** retrieval path (ADR-019). `found:true` with PII-redacted content + stored flags for a quarantined id; `found:false` (identical empty shape) for an **unknown OR non-quarantined** id, so it is never a generic id-lookup bypass of `validate_read`'s scoping. A missing/non-string `id` is graceful (`found:false`, no panic). Read-only: no promotion/demotion/delete |
+| `verify_delete` | `{"op":"verify_delete","id":…}` | `{"confirmed":true,"residue_detected":bool,"residue_summary"?:…,"deletion_hash":…}` — fresh post-delete presence check **plus** a residue scan of the remaining store; `residue_summary` present only when `residue_detected:true`; `deletion_hash` is a deterministic SHA-256 of the deletion op. Scans every backing index unfiltered, so a quarantined entry deletes and residue-scans identically to any other |
 | *(other / malformed)* | any unparseable / unknown op | `{"error":{"code","message","retryable":false}}` (`bad_request` / `unknown_op`) |
 
 - Socket permissions are `0600` (owner-only). There is **no** `SO_PEERCRED` peer-uid check in v0 (the
@@ -113,9 +124,10 @@ same seam.
 type MemoryGuard struct { /* mu sync.Mutex; det Detector; store map[string]entry */ }
 
 func NewMemoryGuard(det Detector, store ...MemoryStore) *MemoryGuard             // det == nil → default RegexDetector; omitted store → default InMemoryStore
-func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ...string) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected → named-key policy (ADR-017) → RedactPII → store BOUND TO the writer's key (Principal.Subject(), or sharedScopeKey when attested + scope "shared") (ADR-004/ADR-013); returns {allow, stored_id, flags}. The variadic key is an optional logical slot name (ADR-017); a 2-arg call is byte-identical to pre-021
-func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // store-side ScanScoped over the reader's visible keys {Subject()|unbound, sharedScopeKey} → RedactPII; returns {allow, content_redacted, flags} (ADR-013)
-func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors across EVERY backing index/copy for residue; returns {confirmed, residue_detected, residue_summary?, deletion_hash}
+func (g *MemoryGuard) ValidateWrite(text string, identity map[string]any, key ...string) map[string]any  // write-gate: DetectInjection → fail-closed on injection_suspected (state "block") → named-key policy (ADR-017) → DetectBorderline → state "quarantine" (stored quarantined:true) → RedactPII → store BOUND TO the writer's key (ADR-004/ADR-013); returns {allow, stored_id, flags, state} with state ∈ {allow,quarantine,block}, allow == (state != "block") (ADR-019). The variadic key is an optional logical slot name (ADR-017); a 2-arg call is byte-identical to pre-021
+func (g *MemoryGuard) ValidateRead(query string, identity map[string]any) map[string]any   // store-side ScanScoped over the reader's visible keys {Subject()|unbound, sharedScopeKey}, EXCLUDING quarantined:true entries (ADR-019) → RedactPII; returns {allow, content_redacted, flags} (ADR-013)
+func (g *MemoryGuard) ReviewQuarantine(id string) map[string]any                            // quarantine-only retrieval (ADR-019): found:false for unknown OR non-quarantined id; PII-redacted; read-only; returns {found, content_redacted, flags}
+func (g *MemoryGuard) VerifyDelete(id string) map[string]any                                // delete → re-check absence → scan survivors across EVERY backing index/copy for residue (unfiltered, quarantined entries included); returns {confirmed, residue_detected, residue_summary?, deletion_hash}
 ```
 
 - **The store backend seam is the `Detector` plus the in-memory `store`** (`guard.go`). The detection
@@ -141,11 +153,13 @@ func (g *MemoryGuard) VerifyDelete(id string) map[string]any                    
 type Detector interface {
     RedactPII(text string) (redacted string, flags []string)  // PII → "<LABEL>" placeholders + "pii:<LABEL>" flags
     DetectInjection(text string) []string                      // ["injection_suspected"] or nil
+    DetectBorderline(text string) []string                     // ["borderline_suspected"] or nil (ADR-019): narrow, additive, orthogonal quarantine trigger
 }
 
 func NewRegexDetector() *RegexDetector                          // the v0 pure-Go Presidio stand-in / parity baseline
 func (d *RegexDetector) RedactPII(text string) (string, []string)
 func (d *RegexDetector) DetectInjection(text string) []string
+func (d *RegexDetector) DetectBorderline(text string) []string
 
 func NewNativeDetector() *NativeDetector                        // v1 production backend (ADR-002): Go-native, in-process, zero new deps; CLI/serve default
 func (d *NativeDetector) RedactPII(text string) (string, []string)
